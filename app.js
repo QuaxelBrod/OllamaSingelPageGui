@@ -16,11 +16,13 @@ const state = {
   defaultModel: "",
   activeChatId: null,
   chats: [],
+  requestPending: false,
 };
 
 function init() {
   cacheDom();
   restoreState();
+  setRequestPending(false);
   bindEvents();
   ensureChatExists();
   renderAll();
@@ -46,6 +48,7 @@ function cacheDom() {
   dom.messageForm = document.getElementById("message-form");
   dom.messageInput = document.getElementById("message-input");
   dom.imageInput = document.getElementById("image-input");
+  dom.messageSubmit = dom.messageForm?.querySelector('button[type="submit"]');
   dom.statusBanner = document.getElementById("status-banner");
 }
 
@@ -62,12 +65,14 @@ function restoreState() {
     console.warn("Konnte gespeicherten Zustand nicht laden:", err);
   }
 
+  state.requestPending = false;
   dom.serverUrlInput.value = state.serverUrl || DEFAULT_SERVER;
 }
 
 function persistState() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    const { requestPending, ...persistableState } = state;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(persistableState));
   } catch (err) {
     console.warn("Konnte Zustand nicht speichern:", err);
   }
@@ -92,6 +97,10 @@ function bindEvents() {
   });
 
   dom.newChatBtn.addEventListener("click", () => {
+    if (state.requestPending) {
+      showStatus("Bitte warte, bis die aktuelle Antwort beendet ist.", "error", 2500);
+      return;
+    }
     createNewChat();
   });
 
@@ -210,7 +219,6 @@ function renderChatMeta() {
       chat.params?.repeat_penalty ?? defaultParams.repeat_penalty;
     dom.paramMirostat.value = chat.params?.mirostat ?? defaultParams.mirostat;
     dom.paramSeed.value = chat.params?.seed ?? defaultParams.seed;
-    dom.messageInput.disabled = false;
   } else {
     dom.chatTitleInput.value = "";
     dom.chatModelSelect.innerHTML = "";
@@ -224,6 +232,20 @@ function renderChatMeta() {
   }
 
   populateModelSelect(dom.defaultModelSelect, models, state.defaultModel, true);
+
+  const inputDisabled = state.requestPending || !chat;
+  if (dom.messageInput) {
+    dom.messageInput.disabled = inputDisabled;
+  }
+  if (dom.messageSubmit) {
+    dom.messageSubmit.disabled = inputDisabled;
+  }
+  if (dom.imageInput) {
+    dom.imageInput.disabled = inputDisabled;
+  }
+  if (dom.newChatBtn) {
+    dom.newChatBtn.disabled = state.requestPending;
+  }
 }
 
 function renderMessages() {
@@ -237,28 +259,43 @@ function renderMessages() {
     const article = node.querySelector(".message");
     article.dataset.messageId = message.id;
     article.classList.add(message.role);
-    if (message.pending) {
+
+    const isThinkingMessage = message.purpose === "thinking";
+
+    if (isThinkingMessage || message.pending) {
       article.classList.add("thinking");
     }
     if (message.error) {
       article.classList.add("error");
     }
 
-    node.querySelector(".role").textContent =
-      message.role === "user" ? "Du" : "Assistent";
+    const roleLabel =
+      message.role === "user"
+        ? "Du"
+        : isThinkingMessage
+        ? "Assistent • Thinking"
+        : "Assistent";
+    node.querySelector(".role").textContent = roleLabel;
     node.querySelector(".timestamp").textContent = formatTime(message.createdAt);
-    node.querySelector(".content").textContent = message.content ?? "";
+    const displayContent =
+      typeof message.content === "string" && message.content.length
+        ? message.content
+        : typeof message.thinking === "string"
+        ? message.thinking
+        : "";
+    node.querySelector(".content").textContent = displayContent;
 
     const thinkingEl = node.querySelector(".thinking");
-    const thinkingText = typeof message.thinking === "string" ? message.thinking.trim() : "";
-    if (thinkingText) {
-      thinkingEl.textContent = thinkingText;
-      thinkingEl.hidden = false;
+    if (isThinkingMessage) {
+      if (message.pending && !(message.content && message.content.trim())) {
+        thinkingEl.textContent = "Denkt nach …";
+        thinkingEl.hidden = false;
+      } else {
+        thinkingEl.textContent = "";
+        thinkingEl.hidden = true;
+      }
     } else if (message.pending) {
-      thinkingEl.textContent =
-        message.content && message.content.length
-          ? "Antwort wird generiert …"
-          : "Denkt nach …";
+      thinkingEl.textContent = "Antwort wird generiert …";
       thinkingEl.hidden = false;
     } else {
       thinkingEl.textContent = "";
@@ -286,10 +323,14 @@ function renderMessages() {
     dom.messageList.appendChild(node);
   });
 
-  dom.messageList.scrollTop = dom.messageList.scrollHeight;
+  scrollMessageListToBottom({ smooth: true });
 }
 
 function createNewChat() {
+  if (state.requestPending) {
+    showStatus("Während einer laufenden Antwort kann kein neuer Chat erstellt werden.", "error", 2500);
+    return;
+  }
   const chat = buildChat();
   state.chats.push(chat);
   state.activeChatId = chat.id;
@@ -460,6 +501,10 @@ function updateChatModelFallbacks() {
 
 async function handleMessageSubmit(event) {
   event.preventDefault();
+  if (state.requestPending) {
+    showStatus("Bitte warte, bis die aktuelle Antwort beendet ist.", "error", 2500);
+    return;
+  }
   const chat = getActiveChat();
   if (!chat) {
     showStatus("Kein aktiver Chat verfügbar", "error", 3000);
@@ -499,45 +544,51 @@ async function handleMessageSubmit(event) {
     attachments,
   };
 
-  const assistantMessage = {
+  const thinkingMessage = {
     id: createId(),
     role: "assistant",
     content: "",
     createdAt: now,
     attachments: [],
     pending: true,
-    thinking: "",
+    purpose: "thinking",
   };
 
-  chat.messages.push(userMessage, assistantMessage);
+  chat.messages.push(userMessage, thinkingMessage);
   chat.updatedAt = now;
   dom.messageInput.value = "";
+  setRequestPending(true);
   persistState();
   renderMessages();
   renderChatList();
 
   try {
-    await streamChatCompletion(chat, assistantMessage);
+    await streamChatCompletion(chat, thinkingMessage);
   } catch (error) {
-    assistantMessage.pending = false;
-    assistantMessage.error = error.message;
-    assistantMessage.content = assistantMessage.content || "Fehler bei der Antwort.";
+    thinkingMessage.pending = false;
+    thinkingMessage.error = error.message;
+    thinkingMessage.content =
+      thinkingMessage.content || `Fehler bei der Antwort: ${error.message}`;
+    thinkingMessage.purpose = "thinking";
     chat.updatedAt = new Date().toISOString();
     persistState();
     renderMessages();
     showStatus(error.message, "error");
+  } finally {
+    setRequestPending(false);
   }
 }
 
-async function streamChatCompletion(chat, assistantMessage) {
+async function streamChatCompletion(chat, thinkingMessage) {
   const url = sanitizeServerUrl(state.serverUrl || DEFAULT_SERVER);
   const endpoint = `${url}/api/chat`;
 
   const payload = {
     model: chat.model || state.defaultModel,
     messages: chat.messages
-      .filter((message) => !(message.id === assistantMessage.id))
-      .map((message) => serializeMessageForRequest(message)),
+      .filter((message) => message.id !== thinkingMessage.id && message.purpose !== "thinking")
+      .map((message) => serializeMessageForRequest(message))
+      .filter(Boolean),
     stream: true,
     options: buildOptionsFromParams(chat.params),
   };
@@ -558,8 +609,17 @@ async function streamChatCompletion(chat, assistantMessage) {
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
 
-  assistantMessage.pending = true;
-  assistantMessage.content = "";
+  thinkingMessage.pending = true;
+  thinkingMessage.content = thinkingMessage.content || "";
+
+  const responseDraft = {
+    id: createId(),
+    text: "",
+    attachments: [],
+    pending: true,
+    thinking: "",
+    stats: null,
+  };
 
   while (true) {
     const { value, done } = await reader.read();
@@ -571,47 +631,94 @@ async function streamChatCompletion(chat, assistantMessage) {
       const line = buffer.slice(0, newlineIndex).trim();
       buffer = buffer.slice(newlineIndex + 1);
       if (!line) continue;
-      processStreamLine(line, assistantMessage, chat);
+      processStreamLine(line, { thinkingMessage, responseDraft, chat });
     }
   }
 
   buffer = buffer.trim();
   if (buffer) {
-    processStreamLine(buffer, assistantMessage, chat);
+    processStreamLine(buffer, { thinkingMessage, responseDraft, chat });
   }
 
-  assistantMessage.pending = false;
-  assistantMessage.createdAt = new Date().toISOString();
-  chat.updatedAt = assistantMessage.createdAt;
+  thinkingMessage.pending = false;
+  thinkingMessage.createdAt = thinkingMessage.createdAt || new Date().toISOString();
+
+  const finalThinking = (responseDraft.thinking || thinkingMessage.content || "").trim();
+  thinkingMessage.content = finalThinking;
+
+  let finalContent = responseDraft.text.trim();
+  if (responseDraft.stats) {
+    const statsSection = formatStatsSection(responseDraft.stats);
+    finalContent = finalContent
+      ? `${finalContent}\n\n${statsSection}`
+      : statsSection;
+  }
+
+  const hasResponse =
+    finalContent.length > 0 ||
+    (Array.isArray(responseDraft.attachments) && responseDraft.attachments.length > 0);
+
+  if (hasResponse) {
+    const assistantMessage = {
+      id: createId(),
+      role: "assistant",
+      content: finalContent,
+      createdAt: new Date().toISOString(),
+      attachments: responseDraft.attachments || [],
+      pending: false,
+      purpose: "response",
+    };
+    chat.messages.push(assistantMessage);
+  }
+
+  if (!finalThinking) {
+    chat.messages = chat.messages.filter((message) => message.id !== thinkingMessage.id);
+  }
+
+  chat.updatedAt = new Date().toISOString();
   persistState();
   renderMessages();
   renderChatList();
 }
 
-function processStreamLine(line, assistantMessage, chat) {
+function processStreamLine(line, context) {
+  const { thinkingMessage, responseDraft } = context;
   try {
     const payload = JSON.parse(line);
     if (payload.error) {
       throw new Error(payload.error);
     }
 
-    if (payload.message?.content) {
-      assistantMessage.content += payload.message.content;
+    let hasDirectThinking = false;
+    if (typeof payload.thinking === "string" && payload.thinking.length) {
+      responseDraft.thinking = mergeThinkingText(responseDraft.thinking || "", payload.thinking);
+      thinkingMessage.content = responseDraft.thinking.trimStart();
+      thinkingMessage.pending = !payload.done;
+      hasDirectThinking = true;
     }
 
-    const thinkingFragments = extractThinkingFragments(payload);
-    if (thinkingFragments.length) {
-      thinkingFragments.forEach((fragment) => {
-        assistantMessage.thinking = mergeThinkingText(
-          assistantMessage.thinking || "",
-          fragment
-        );
-      });
+    if (!hasDirectThinking) {
+      const fragments = extractThinkingFragments(payload);
+      if (fragments.length) {
+        fragments.forEach((fragment) => {
+          responseDraft.thinking = mergeThinkingText(responseDraft.thinking || "", fragment);
+        });
+        thinkingMessage.content = responseDraft.thinking.trimStart();
+        thinkingMessage.pending = !payload.done;
+      }
     }
 
-    if (Array.isArray(payload.message?.images) && payload.message.images.length) {
-      assistantMessage.attachments = payload.message.images.map((base64, index) => ({
-        id: `${assistantMessage.id}-img-${index}`,
+    if (typeof payload.response === "string" && payload.response.length) {
+      responseDraft.text += payload.response;
+    }
+
+    const messageImages = Array.isArray(payload.message?.images)
+      ? payload.message.images
+      : null;
+    const images = Array.isArray(payload.images) ? payload.images : messageImages;
+    if (Array.isArray(images) && images.length) {
+      responseDraft.attachments = images.map((base64, index) => ({
+        id: `${responseDraft.id}-img-${index}`,
         dataUrl: `data:image/png;base64,${base64}`,
         base64,
         mime: "image/png",
@@ -619,7 +726,9 @@ function processStreamLine(line, assistantMessage, chat) {
     }
 
     if (payload.done) {
-      assistantMessage.pending = false;
+      thinkingMessage.pending = false;
+      responseDraft.pending = false;
+      responseDraft.stats = extractStats(payload);
     }
 
     persistState();
@@ -630,9 +739,13 @@ function processStreamLine(line, assistantMessage, chat) {
 }
 
 function serializeMessageForRequest(message) {
+  if (message.purpose === "thinking") {
+    return null;
+  }
+
   const result = {
     role: message.role,
-    content: message.content,
+    content: message.content ?? "",
   };
 
   const imageBases = (message.attachments || [])
@@ -709,17 +822,28 @@ function extractThinkingFragments(payload) {
     return fragments;
   }
 
-  const { message } = payload;
+  const { message = {}, delta = {} } = payload;
 
   const candidates = [
-    payload.thinking,
     message?.thinking,
     message?.reasoning,
+    payload.reasoning,
+    delta?.thinking,
+    delta?.reasoning,
   ];
 
   // Bei manchen Modellen wird Thinking als eigener Nachrichtentyp gestreamt
   if (message?.type === "thinking" && typeof message.content === "string") {
     candidates.push(message.content);
+  }
+  if (message?.thinking && typeof message.thinking === "string") {
+    candidates.push(message.thinking);
+  }
+  if (payload.type === "thinking" && typeof payload.content === "string") {
+    candidates.push(payload.content);
+  }
+  if (delta?.type === "thinking" && typeof delta.content === "string") {
+    candidates.push(delta.content);
   }
 
   candidates.forEach((value) => {
@@ -744,6 +868,124 @@ function mergeThinkingText(current, incoming) {
   }
 
   return `${current}${incoming}`;
+}
+
+function scrollMessageListToBottom({ smooth } = { smooth: false }) {
+  if (!dom.messageList) return;
+  const behavior = smooth ? "smooth" : "auto";
+
+  requestAnimationFrame(() => {
+    dom.messageList.scroll({
+      top: dom.messageList.scrollHeight,
+      behavior,
+    });
+
+    const lastMessage = dom.messageList.lastElementChild;
+    if (lastMessage) {
+      lastMessage.scrollIntoView({ behavior, block: "end" });
+    }
+  });
+}
+
+function extractStats(payload) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const stats = {};
+  const numericKeys = [
+    "total_duration",
+    "load_duration",
+    "prompt_eval_count",
+    "prompt_eval_duration",
+    "eval_count",
+    "eval_duration",
+  ];
+
+  numericKeys.forEach((key) => {
+    if (typeof payload[key] === "number") {
+      stats[key] = payload[key];
+    }
+  });
+
+  if (typeof payload.done_reason === "string") {
+    stats.done_reason = payload.done_reason;
+  }
+
+  if (Array.isArray(payload.context)) {
+    stats.context = payload.context;
+  }
+
+  return Object.keys(stats).length ? stats : null;
+}
+
+function formatStatsSection(stats) {
+  if (!stats) return "";
+
+  const lines = ["---", "Statistiken:"];
+
+  if (typeof stats.done_reason === "string") {
+    lines.push(`- Beendigungsgrund: ${stats.done_reason}`);
+  }
+  if (typeof stats.total_duration === "number") {
+    lines.push(`- Gesamtdauer: ${formatDuration(stats.total_duration)}`);
+  }
+  if (typeof stats.load_duration === "number") {
+    lines.push(`- Ladedauer: ${formatDuration(stats.load_duration)}`);
+  }
+  if (typeof stats.prompt_eval_count === "number") {
+    lines.push(`- Prompt-Tokens: ${stats.prompt_eval_count}`);
+  }
+  if (typeof stats.prompt_eval_duration === "number") {
+    lines.push(`- Prompt-Dauer: ${formatDuration(stats.prompt_eval_duration)}`);
+  }
+  if (typeof stats.eval_count === "number") {
+    lines.push(`- Antwort-Tokens: ${stats.eval_count}`);
+  }
+  if (typeof stats.eval_duration === "number") {
+    lines.push(`- Antwort-Dauer: ${formatDuration(stats.eval_duration)}`);
+  }
+  if (Array.isArray(stats.context)) {
+    lines.push(`- Kontext-Länge: ${stats.context.length}`);
+  }
+
+  return lines.join("\n");
+}
+
+function formatDuration(nanoseconds) {
+  if (typeof nanoseconds !== "number") {
+    return String(nanoseconds);
+  }
+
+  const seconds = nanoseconds / 1e9;
+  if (seconds >= 1) {
+    return `${seconds.toFixed(2)} s`;
+  }
+
+  const milliseconds = nanoseconds / 1e6;
+  if (milliseconds >= 1) {
+    return `${milliseconds.toFixed(2)} ms`;
+  }
+
+  const microseconds = nanoseconds / 1e3;
+  return `${microseconds.toFixed(2)} µs`;
+}
+
+function setRequestPending(isPending) {
+  state.requestPending = Boolean(isPending);
+
+  if (dom.newChatBtn) {
+    dom.newChatBtn.disabled = state.requestPending;
+  }
+  if (dom.messageInput) {
+    dom.messageInput.disabled = state.requestPending || !getActiveChat();
+  }
+  if (dom.messageSubmit) {
+    dom.messageSubmit.disabled = state.requestPending || !getActiveChat();
+  }
+  if (dom.imageInput) {
+    dom.imageInput.disabled = state.requestPending || !getActiveChat();
+  }
 }
 
 function createId() {
