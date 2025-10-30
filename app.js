@@ -16,11 +16,15 @@ const state = {
   defaultModel: "",
   activeChatId: null,
   chats: [],
+  requestPending: false,
 };
+
+let currentAbortController = null;
 
 function init() {
   cacheDom();
   restoreState();
+  setRequestPending(false);
   bindEvents();
   ensureChatExists();
   renderAll();
@@ -46,6 +50,8 @@ function cacheDom() {
   dom.messageForm = document.getElementById("message-form");
   dom.messageInput = document.getElementById("message-input");
   dom.imageInput = document.getElementById("image-input");
+  dom.messageSubmit = dom.messageForm?.querySelector('button[type="submit"]');
+  dom.cancelRequestBtn = document.getElementById("cancel-request-btn");
   dom.statusBanner = document.getElementById("status-banner");
 }
 
@@ -62,12 +68,15 @@ function restoreState() {
     console.warn("Konnte gespeicherten Zustand nicht laden:", err);
   }
 
+  state.requestPending = false;
+  currentAbortController = null;
   dom.serverUrlInput.value = state.serverUrl || DEFAULT_SERVER;
 }
 
 function persistState() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    const { requestPending, ...persistable } = state;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(persistable));
   } catch (err) {
     console.warn("Konnte Zustand nicht speichern:", err);
   }
@@ -92,6 +101,10 @@ function bindEvents() {
   });
 
   dom.newChatBtn.addEventListener("click", () => {
+    if (state.requestPending) {
+      showStatus("Bitte warte, bis die aktuelle Antwort beendet ist.", "error", 2500);
+      return;
+    }
     createNewChat();
   });
 
@@ -137,6 +150,10 @@ function bindEvents() {
   dom.chatItems.addEventListener("click", (event) => {
     const li = event.target.closest("li[data-chat-id]");
     if (!li) return;
+    if (state.requestPending) {
+      showStatus("Bitte warte, bis die aktuelle Antwort beendet ist.", "error", 2500);
+      return;
+    }
     const chatId = li.dataset.chatId;
     if (chatId === state.activeChatId) return;
     state.activeChatId = chatId;
@@ -145,6 +162,8 @@ function bindEvents() {
   });
 
   dom.messageForm.addEventListener("submit", handleMessageSubmit);
+  dom.cancelRequestBtn?.addEventListener("click", handleCancelRequest);
+  dom.messageList.addEventListener("click", handleMessageListClick);
 }
 
 function ensureChatExists() {
@@ -210,7 +229,6 @@ function renderChatMeta() {
       chat.params?.repeat_penalty ?? defaultParams.repeat_penalty;
     dom.paramMirostat.value = chat.params?.mirostat ?? defaultParams.mirostat;
     dom.paramSeed.value = chat.params?.seed ?? defaultParams.seed;
-    dom.messageInput.disabled = false;
   } else {
     dom.chatTitleInput.value = "";
     dom.chatModelSelect.innerHTML = "";
@@ -224,6 +242,23 @@ function renderChatMeta() {
   }
 
   populateModelSelect(dom.defaultModelSelect, models, state.defaultModel, true);
+
+  const inputDisabled = state.requestPending || !chat;
+  if (dom.messageInput) {
+    dom.messageInput.disabled = inputDisabled;
+  }
+  if (dom.messageSubmit) {
+    dom.messageSubmit.disabled = inputDisabled;
+  }
+  if (dom.imageInput) {
+    dom.imageInput.disabled = inputDisabled;
+  }
+  if (dom.newChatBtn) {
+    dom.newChatBtn.disabled = state.requestPending;
+  }
+  if (dom.deleteChatBtn) {
+    dom.deleteChatBtn.disabled = state.requestPending;
+  }
 }
 
 function renderMessages() {
@@ -237,17 +272,31 @@ function renderMessages() {
     const article = node.querySelector(".message");
     article.dataset.messageId = message.id;
     article.classList.add(message.role);
-    if (message.pending) {
+    const isThinkingMessage = message.purpose === "thinking";
+    if (message.pending || isThinkingMessage) {
       article.classList.add("thinking");
     }
     if (message.error) {
       article.classList.add("error");
     }
 
-    node.querySelector(".role").textContent =
-      message.role === "user" ? "Du" : "Assistent";
+    const roleLabel =
+      message.role === "user"
+        ? "Du"
+        : isThinkingMessage
+        ? "Assistent • Thinking"
+        : "Assistent";
+    node.querySelector(".role").textContent = roleLabel;
     node.querySelector(".timestamp").textContent = formatTime(message.createdAt);
-    node.querySelector(".content").textContent = message.content ?? "";
+    const contentEl = node.querySelector(".content");
+    contentEl.textContent = message.content ?? "";
+
+    const deleteBtn = node.querySelector(".message-delete");
+    if (deleteBtn) {
+      deleteBtn.dataset.messageId = message.id;
+      deleteBtn.disabled = state.requestPending;
+      deleteBtn.hidden = false;
+    }
 
     const thinkingEl = node.querySelector(".thinking");
     const thinkingText = typeof message.thinking === "string" ? message.thinking.trim() : "";
@@ -286,7 +335,7 @@ function renderMessages() {
     dom.messageList.appendChild(node);
   });
 
-  dom.messageList.scrollTop = dom.messageList.scrollHeight;
+  scrollMessageListToBottom({ smooth: true });
 }
 
 function createNewChat() {
@@ -460,6 +509,10 @@ function updateChatModelFallbacks() {
 
 async function handleMessageSubmit(event) {
   event.preventDefault();
+  if (state.requestPending) {
+    showStatus("Bitte warte, bis die aktuelle Antwort beendet ist.", "error", 2500);
+    return;
+  }
   const chat = getActiveChat();
   if (!chat) {
     showStatus("Kein aktiver Chat verfügbar", "error", 3000);
@@ -499,7 +552,7 @@ async function handleMessageSubmit(event) {
     attachments,
   };
 
-  const assistantMessage = {
+  const thinkingMessage = {
     id: createId(),
     role: "assistant",
     content: "",
@@ -507,37 +560,63 @@ async function handleMessageSubmit(event) {
     attachments: [],
     pending: true,
     thinking: "",
+    purpose: "thinking",
   };
 
-  chat.messages.push(userMessage, assistantMessage);
+  chat.messages.push(userMessage, thinkingMessage);
   chat.updatedAt = now;
   dom.messageInput.value = "";
+  setRequestPending(true);
+  currentAbortController = new AbortController();
   persistState();
   renderMessages();
   renderChatList();
 
   try {
-    await streamChatCompletion(chat, assistantMessage);
+    await streamChatCompletion(chat, thinkingMessage, currentAbortController.signal);
   } catch (error) {
-    assistantMessage.pending = false;
-    assistantMessage.error = error.message;
-    assistantMessage.content = assistantMessage.content || "Fehler bei der Antwort.";
-    chat.updatedAt = new Date().toISOString();
+    if (error.name === "AbortError") {
+      thinkingMessage.pending = false;
+      const existingThinking = (thinkingMessage.thinking || "").trim();
+      const abortNote = "Generierung abgebrochen.";
+      thinkingMessage.thinking = existingThinking
+        ? `${existingThinking}\n${abortNote}`
+        : abortNote;
+      chat.updatedAt = new Date().toISOString();
+      persistState();
+      renderMessages();
+      showStatus("Generierung abgebrochen.", "success", 2000);
+    } else {
+      thinkingMessage.pending = false;
+      thinkingMessage.error = error.message;
+      thinkingMessage.content =
+        thinkingMessage.content || `Fehler bei der Antwort: ${error.message}`;
+      chat.updatedAt = new Date().toISOString();
+      persistState();
+      renderMessages();
+      showStatus(error.message, "error");
+    }
+  } finally {
+    if (currentAbortController) {
+      currentAbortController = null;
+    }
+    setRequestPending(false);
     persistState();
     renderMessages();
-    showStatus(error.message, "error");
+    renderChatList();
   }
 }
 
-async function streamChatCompletion(chat, assistantMessage) {
+async function streamChatCompletion(chat, thinkingMessage, signal) {
   const url = sanitizeServerUrl(state.serverUrl || DEFAULT_SERVER);
   const endpoint = `${url}/api/chat`;
 
   const payload = {
     model: chat.model || state.defaultModel,
     messages: chat.messages
-      .filter((message) => !(message.id === assistantMessage.id))
-      .map((message) => serializeMessageForRequest(message)),
+      .filter((message) => message.id !== thinkingMessage.id && message.purpose !== "thinking")
+      .map((message) => serializeMessageForRequest(message))
+      .filter(Boolean),
     stream: true,
     options: buildOptionsFromParams(chat.params),
   };
@@ -548,18 +627,26 @@ async function streamChatCompletion(chat, assistantMessage) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
+    signal,
   });
 
   if (!response.ok || !response.body) {
     throw new Error(`Ollama antwortet nicht korrekt (Status ${response.status})`);
   }
 
+  const responseState = {
+    text: "",
+    attachments: [],
+    stats: null,
+    thinking: thinkingMessage.thinking || "",
+  };
+
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
 
-  assistantMessage.pending = true;
-  assistantMessage.content = "";
+  thinkingMessage.pending = true;
+  thinkingMessage.thinking = thinkingMessage.thinking || "";
 
   while (true) {
     const { value, done } = await reader.read();
@@ -571,68 +658,38 @@ async function streamChatCompletion(chat, assistantMessage) {
       const line = buffer.slice(0, newlineIndex).trim();
       buffer = buffer.slice(newlineIndex + 1);
       if (!line) continue;
-      processStreamLine(line, assistantMessage, chat);
+      const changed = handleStreamPayload(line, { thinkingMessage, responseState });
+      if (changed) {
+        persistState();
+        renderMessages();
+      }
     }
   }
 
   buffer = buffer.trim();
   if (buffer) {
-    processStreamLine(buffer, assistantMessage, chat);
+    const changed = handleStreamPayload(buffer, { thinkingMessage, responseState });
+    if (changed) {
+      persistState();
+      renderMessages();
+    }
   }
 
-  assistantMessage.pending = false;
-  assistantMessage.createdAt = new Date().toISOString();
-  chat.updatedAt = assistantMessage.createdAt;
+  finalizeStream(chat, thinkingMessage, responseState);
+  currentAbortController = null;
   persistState();
   renderMessages();
   renderChatList();
 }
 
-function processStreamLine(line, assistantMessage, chat) {
-  try {
-    const payload = JSON.parse(line);
-    if (payload.error) {
-      throw new Error(payload.error);
-    }
-
-    if (payload.message?.content) {
-      assistantMessage.content += payload.message.content;
-    }
-
-    const thinkingFragments = extractThinkingFragments(payload);
-    if (thinkingFragments.length) {
-      thinkingFragments.forEach((fragment) => {
-        assistantMessage.thinking = mergeThinkingText(
-          assistantMessage.thinking || "",
-          fragment
-        );
-      });
-    }
-
-    if (Array.isArray(payload.message?.images) && payload.message.images.length) {
-      assistantMessage.attachments = payload.message.images.map((base64, index) => ({
-        id: `${assistantMessage.id}-img-${index}`,
-        dataUrl: `data:image/png;base64,${base64}`,
-        base64,
-        mime: "image/png",
-      }));
-    }
-
-    if (payload.done) {
-      assistantMessage.pending = false;
-    }
-
-    persistState();
-    renderMessages();
-  } catch (error) {
-    console.error("Streaming-Daten konnten nicht verarbeitet werden:", error, line);
-  }
-}
-
 function serializeMessageForRequest(message) {
+  if (message.purpose === "thinking") {
+    return null;
+  }
+
   const result = {
     role: message.role,
-    content: message.content,
+    content: message.content ?? "",
   };
 
   const imageBases = (message.attachments || [])
@@ -644,6 +701,232 @@ function serializeMessageForRequest(message) {
   }
 
   return result;
+}
+
+function handleStreamPayload(line, context) {
+  const { thinkingMessage, responseState } = context;
+  let payload;
+  try {
+    payload = JSON.parse(line);
+  } catch (error) {
+    console.error("Ungültige Streaming-Zeile:", line, error);
+    return false;
+  }
+
+  if (payload.error) {
+    throw new Error(payload.error);
+  }
+
+  let changed = false;
+  let updatedThinking = false;
+  if (typeof payload.thinking === "string" && payload.thinking.length) {
+    responseState.thinking = mergeThinkingText(responseState.thinking || "", payload.thinking);
+    thinkingMessage.thinking = responseState.thinking.trimStart();
+    thinkingMessage.pending = !payload.done;
+    updatedThinking = true;
+    changed = true;
+  }
+
+  if (!updatedThinking) {
+    const fragments = extractThinkingFragments(payload);
+    if (fragments.length) {
+      fragments.forEach((fragment) => {
+        responseState.thinking = mergeThinkingText(responseState.thinking || "", fragment);
+      });
+      thinkingMessage.thinking = responseState.thinking.trimStart();
+      thinkingMessage.pending = !payload.done;
+      changed = true;
+    }
+  }
+
+  let responseChunk = "";
+  if (typeof payload.response === "string" && payload.response.length) {
+    responseChunk = payload.response;
+  } else if (
+    typeof payload.message?.content === "string" &&
+    payload.message.content.length &&
+    (payload.message.role === "assistant" || !payload.message.role)
+  ) {
+    responseChunk = payload.message.content;
+  }
+
+  if (responseChunk) {
+    responseState.text += responseChunk;
+    changed = true;
+  }
+
+  const images = Array.isArray(payload.images)
+    ? payload.images
+    : Array.isArray(payload.message?.images)
+    ? payload.message.images
+    : null;
+
+  if (Array.isArray(images) && images.length) {
+    responseState.attachments = images.map((base64) => ({
+      id: createId(),
+      dataUrl: `data:image/png;base64,${base64}`,
+      base64,
+      mime: "image/png",
+    }));
+    changed = true;
+  }
+
+  if (payload.done) {
+    thinkingMessage.pending = false;
+    responseState.stats = extractStats(payload);
+    changed = true;
+  }
+
+  return changed;
+}
+
+function finalizeStream(chat, thinkingMessage, responseState) {
+  thinkingMessage.pending = false;
+  thinkingMessage.createdAt = thinkingMessage.createdAt || new Date().toISOString();
+
+  const split = splitThinkingFromAnswer(responseState.text || "");
+  if (split && split.thinking) {
+    thinkingMessage.thinking = split.thinking;
+  }
+
+  const finalThinking = (thinkingMessage.thinking || "").trim();
+  if (!finalThinking) {
+    chat.messages = chat.messages.filter((message) => message.id !== thinkingMessage.id);
+  }
+
+  let finalContent = (split ? split.answer : responseState.text || "").trim();
+  if (responseState.stats) {
+    const statsBlock = formatStatsSection(responseState.stats);
+    finalContent = finalContent ? `${finalContent}\n\n${statsBlock}` : statsBlock;
+  }
+
+  const hasAttachments =
+    Array.isArray(responseState.attachments) && responseState.attachments.length > 0;
+
+  if (finalContent || hasAttachments) {
+    const assistantMessage = {
+      id: createId(),
+      role: "assistant",
+      content: finalContent,
+      createdAt: new Date().toISOString(),
+      attachments: hasAttachments ? responseState.attachments : [],
+      pending: false,
+      purpose: "response",
+    };
+    chat.messages.push(assistantMessage);
+  }
+
+  chat.updatedAt = new Date().toISOString();
+}
+
+function splitThinkingFromAnswer(text) {
+  if (!text || typeof text !== "string") {
+    return null;
+  }
+
+  const THINK_OPEN = "<think>";
+  const THINK_CLOSE = "</think>";
+  const openIdx = text.indexOf(THINK_OPEN);
+  if (openIdx === -1) {
+    return null;
+  }
+
+  const closeIdx = text.indexOf(THINK_CLOSE, openIdx + THINK_OPEN.length);
+  if (closeIdx === -1) {
+    const thinking = text.slice(openIdx + THINK_OPEN.length).trim();
+    const answer = text.slice(0, openIdx).trim();
+    return { thinking, answer };
+  }
+
+  const before = text.slice(0, openIdx);
+  const thinking = text.slice(openIdx + THINK_OPEN.length, closeIdx).trim();
+  const after = text.slice(closeIdx + THINK_CLOSE.length);
+  const answer = (before + after).trim();
+  return { thinking, answer };
+}
+
+function extractStats(payload) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const stats = {};
+  const numericKeys = [
+    "total_duration",
+    "load_duration",
+    "prompt_eval_count",
+    "prompt_eval_duration",
+    "eval_count",
+    "eval_duration",
+  ];
+
+  numericKeys.forEach((key) => {
+    if (typeof payload[key] === "number") {
+      stats[key] = payload[key];
+    }
+  });
+
+  if (typeof payload.done_reason === "string") {
+    stats.done_reason = payload.done_reason;
+  }
+
+  if (Array.isArray(payload.context)) {
+    stats.context = payload.context;
+  }
+
+  return Object.keys(stats).length ? stats : null;
+}
+
+function formatStatsSection(stats) {
+  if (!stats) return "";
+
+  const lines = ["---", "Statistiken:"];
+
+  if (typeof stats.done_reason === "string") {
+    lines.push(`- Beendigungsgrund: ${stats.done_reason}`);
+  }
+  if (typeof stats.total_duration === "number") {
+    lines.push(`- Gesamtdauer: ${formatDuration(stats.total_duration)}`);
+  }
+  if (typeof stats.load_duration === "number") {
+    lines.push(`- Ladedauer: ${formatDuration(stats.load_duration)}`);
+  }
+  if (typeof stats.prompt_eval_count === "number") {
+    lines.push(`- Prompt-Tokens: ${stats.prompt_eval_count}`);
+  }
+  if (typeof stats.prompt_eval_duration === "number") {
+    lines.push(`- Prompt-Dauer: ${formatDuration(stats.prompt_eval_duration)}`);
+  }
+  if (typeof stats.eval_count === "number") {
+    lines.push(`- Antwort-Tokens: ${stats.eval_count}`);
+  }
+  if (typeof stats.eval_duration === "number") {
+    lines.push(`- Antwort-Dauer: ${formatDuration(stats.eval_duration)}`);
+  }
+  if (Array.isArray(stats.context)) {
+    lines.push(`- Kontext-Länge: ${stats.context.length}`);
+  }
+
+  return lines.join("\n");
+}
+
+function formatDuration(nanoseconds) {
+  if (typeof nanoseconds !== "number") {
+    return String(nanoseconds);
+  }
+
+  const seconds = nanoseconds / 1e9;
+  if (seconds >= 1) {
+    return `${seconds.toFixed(2)} s`;
+  }
+
+  const milliseconds = nanoseconds / 1e6;
+  if (milliseconds >= 1) {
+    return `${milliseconds.toFixed(2)} ms`;
+  }
+
+  const microseconds = nanoseconds / 1e3;
+  return `${microseconds.toFixed(2)} µs`;
 }
 
 function buildOptionsFromParams(params = {}) {
@@ -712,14 +995,22 @@ function extractThinkingFragments(payload) {
   const { message } = payload;
 
   const candidates = [
-    payload.thinking,
     message?.thinking,
     message?.reasoning,
+    payload.reasoning,
+    payload.delta?.thinking,
+    payload.delta?.reasoning,
   ];
 
   // Bei manchen Modellen wird Thinking als eigener Nachrichtentyp gestreamt
   if (message?.type === "thinking" && typeof message.content === "string") {
     candidates.push(message.content);
+  }
+  if (payload?.type === "thinking" && typeof payload.content === "string") {
+    candidates.push(payload.content);
+  }
+  if (payload?.delta?.type === "thinking" && typeof payload.delta.content === "string") {
+    candidates.push(payload.delta.content);
   }
 
   candidates.forEach((value) => {
@@ -744,6 +1035,133 @@ function mergeThinkingText(current, incoming) {
   }
 
   return `${current}${incoming}`;
+}
+
+function scrollMessageListToBottom({ smooth } = { smooth: false }) {
+  if (!dom.messageList) return;
+  const behavior = smooth ? "smooth" : "auto";
+  requestAnimationFrame(() => {
+    dom.messageList.scroll({
+      top: dom.messageList.scrollHeight,
+      behavior,
+    });
+  });
+}
+
+function handleCancelRequest() {
+  if (!state.requestPending) {
+    return;
+  }
+  if (!currentAbortController) {
+    showStatus("Keine laufende Anfrage zum Abbrechen.", "info", 2000);
+    return;
+  }
+
+  try {
+    currentAbortController.abort();
+    showStatus("Generierung wird abgebrochen …", "info", 2000);
+  } catch (error) {
+    console.error("Abbruch nicht möglich:", error);
+  } finally {
+    if (dom.cancelRequestBtn) {
+      dom.cancelRequestBtn.disabled = true;
+    }
+  }
+}
+
+function handleMessageListClick(event) {
+  const button = event.target.closest('button[data-action="delete-message"]');
+  if (!button) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  if (state.requestPending) {
+    showStatus("Während einer laufenden Antwort können keine Nachrichten gelöscht werden.", "error", 2500);
+    return;
+  }
+
+  const messageId = button.dataset.messageId;
+  const chat = getActiveChat();
+  if (!chat || !messageId) {
+    return;
+  }
+
+  deleteMessageById(chat, messageId);
+}
+
+function setRequestPending(isPending) {
+  state.requestPending = Boolean(isPending);
+  if (dom.newChatBtn) {
+    dom.newChatBtn.disabled = state.requestPending;
+  }
+  if (dom.deleteChatBtn) {
+    dom.deleteChatBtn.disabled = state.requestPending;
+  }
+  if (dom.messageInput) {
+    dom.messageInput.disabled = state.requestPending || !getActiveChat();
+  }
+  if (dom.messageSubmit) {
+    dom.messageSubmit.disabled = state.requestPending || !getActiveChat();
+  }
+  if (dom.imageInput) {
+    dom.imageInput.disabled = state.requestPending || !getActiveChat();
+  }
+  if (dom.cancelRequestBtn) {
+    dom.cancelRequestBtn.disabled = !state.requestPending;
+    dom.cancelRequestBtn.hidden = !state.requestPending;
+  }
+}
+
+function deleteMessageById(chat, messageId) {
+  if (!chat || !messageId) {
+    return;
+  }
+
+  const index = chat.messages.findIndex((message) => message.id === messageId);
+  if (index === -1) {
+    return;
+  }
+
+  const [removed] = chat.messages.splice(index, 1);
+  chat.updatedAt = new Date().toISOString();
+  persistState();
+  renderMessages();
+  renderChatList();
+
+  if (removed.role === "assistant") {
+    const previousUser = findPreviousUserMessage(chat.messages, index - 1);
+    if (previousUser) {
+      const userIndex = chat.messages.findIndex((message) => message.id === previousUser.id);
+      const assistantAfterUser = chat.messages.some(
+        (message, idx) => idx > userIndex && message.role === "assistant"
+      );
+      if (!assistantAfterUser && dom.messageInput) {
+        dom.messageInput.value = previousUser.content || "";
+        dom.messageInput.focus();
+        showStatus("Letzte Frage kann erneut gesendet werden.", "info", 2500);
+        return;
+      }
+    }
+  }
+
+  showStatus("Nachricht gelöscht.", "success", 2000);
+}
+
+function findPreviousUserMessage(messages, startIndex) {
+  if (!Array.isArray(messages) || !messages.length) {
+    return null;
+  }
+
+  for (let i = Math.min(startIndex, messages.length - 1); i >= 0; i -= 1) {
+    if (messages[i]?.role === "user") {
+      return messages[i];
+    }
+  }
+
+  return null;
 }
 
 function createId() {
