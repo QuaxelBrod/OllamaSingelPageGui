@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ollama Chat Console</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="app-header">
+        <h1>Ollama Chat Console</h1>
+        <button id="new-chat-btn" class="primary-btn">Neuer Chat</button>
+      </header>
+      <div id="status-banner" class="status-banner" hidden></div>
+
+      <section class="settings-panel">
+        <div class="field">
+          <label for="server-url">Ollama Server URL</label>
+          <input
+            type="text"
+            id="server-url"
+            placeholder="http://localhost:11434"
+          />
+        </div>
+        <div class="field">
+          <label for="default-model">Standardmodell</label>
+          <select id="default-model"></select>
+          <button id="refresh-models-btn" class="secondary-btn">
+            Modelle aktualisieren
+          </button>
+        </div>
+      </section>
+
+      <main class="main-layout">
+        <aside class="chat-list">
+          <div class="chat-list-header">
+            <h2>Chats</h2>
+            <button id="delete-chat-btn" class="danger-btn">
+              Ausgewählten Chat löschen
+            </button>
+          </div>
+          <ul id="chat-items"></ul>
+        </aside>
+
+        <section class="chat-area">
+          <div class="chat-meta">
+            <div class="field">
+              <label for="chat-title">Titel</label>
+              <input type="text" id="chat-title" placeholder="Neuer Chat" />
+            </div>
+            <div class="field">
+              <label for="chat-model">Modell</label>
+              <select id="chat-model"></select>
+            </div>
+          </div>
+
+          <details class="chat-parameters">
+            <summary>Parameter</summary>
+            <div class="parameter-grid">
+              <label
+                >Temperatur
+                <input
+                  type="number"
+                  id="param-temperature"
+                  step="0.1"
+                  min="0"
+                  max="2"
+                />
+              </label>
+              <label
+                >Top K
+                <input type="number" id="param-topk" step="1" min="0" />
+              </label>
+              <label
+                >Top P
+                <input
+                  type="number"
+                  id="param-topp"
+                  step="0.05"
+                  min="0"
+                  max="1"
+                />
+              </label>
+              <label
+                >Repeat Penalty
+                <input
+                  type="number"
+                  id="param-repeatpenalty"
+                  step="0.1"
+                  min="0"
+                />
+              </label>
+              <label
+                >Mirostat
+                <input type="number" id="param-mirostat" step="1" min="0" />
+              </label>
+              <label
+                >Seed
+                <input type="number" id="param-seed" step="1" />
+              </label>
+            </div>
+          </details>
+
+          <div id="message-list" class="message-list"></div>
+
+          <form id="message-form" class="message-form">
+            <textarea
+              id="message-input"
+              placeholder="Frage stellen …"
+              rows="3"
+              required
+            ></textarea>
+            <div class="message-form-footer">
+              <label class="file-label">
+                Bild anhängen
+                <input type="file" id="image-input" accept="image/*" />
+              </label>
+              <button type="submit" class="primary-btn">Senden</button>
+            </div>
+          </form>
+        </section>
+      </main>
+
+      <footer class="app-footer">
+        <p>
+          Einstellungen und Chats werden im Browser gespeichert. Verbinde dich
+          mit deinem lokalen oder entfernten Ollama Server.
+        </p>
+      </footer>
+    </div>
+
+    <template id="message-template">
+      <article class="message">
+        <header class="message-header">
+          <span class="role"></span>
+          <span class="timestamp"></span>
+        </header>
+        <div class="content"></div>
+        <div class="thinking"></div>
+        <div class="attachments"></div>
+      </article>
+    </template>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

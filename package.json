@@ -1,0 +1,10 @@
+{
+  "name": "ollama-chat-console",
+  "version": "1.0.0",
+  "description": "Minimal Single Page App zum Chatten mit einem Ollama Server.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
+
