@@ -24,14 +24,30 @@ const MIME_TYPES = {
 
 const isProduction = process.env.NODE_ENV === "production";
 
+const TARGET_HEADER = "x-ollama-server";
+const ALLOWED_METHODS = "GET,POST,PUT,PATCH,DELETE,OPTIONS";
+const ALLOWED_HEADERS = "Content-Type, X-Ollama-Server, Authorization";
+
 const server = http.createServer(async (req, res) => {
   try {
     const { method = "GET" } = req;
     const requestPath = sanitizePath(req.url || "/");
+
+    if (method === "OPTIONS") {
+      res.writeHead(204, buildCorsHeaders());
+      res.end();
+      return;
+    }
+
+    if (requestPath.startsWith("ollama/")) {
+      await proxyOllamaRequest(req, res);
+      return;
+    }
+
     const resolvedPath = path.resolve(ROOT_DIR, requestPath);
 
     if (!resolvedPath.startsWith(ROOT_DIR)) {
-      res.writeHead(403);
+      res.writeHead(403, buildCorsHeaders({ "Content-Type": "text/plain" }));
       res.end("Forbidden");
       return;
     }
@@ -73,13 +89,13 @@ const server = http.createServer(async (req, res) => {
     res.end(payload);
   } catch (error) {
     if (error && error.code === "ENOENT") {
-      res.writeHead(404);
+      res.writeHead(404, buildCorsHeaders({ "Content-Type": "text/plain" }));
       res.end("Not Found");
       return;
     }
 
     console.error("Server error:", error);
-    res.writeHead(500);
+    res.writeHead(500, buildCorsHeaders({ "Content-Type": "text/plain" }));
     res.end("Internal Server Error");
   }
 });
@@ -106,9 +122,9 @@ function shouldServeIndex(requestPath) {
 }
 
 function buildHeaders(mimeType) {
-  const headers = {
+  const headers = buildCorsHeaders({
     "Content-Type": mimeType,
-  };
+  });
 
   if (isProduction) {
     headers["Cache-Control"] = "public, max-age=3600";
@@ -117,6 +133,15 @@ function buildHeaders(mimeType) {
   }
 
   return headers;
+}
+
+function buildCorsHeaders(additional = {}) {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": ALLOWED_METHODS,
+    "Access-Control-Allow-Headers": ALLOWED_HEADERS,
+    ...additional,
+  };
 }
 
 function injectRuntimeConfig(html) {
@@ -139,6 +164,101 @@ function normalizeServerUrl(url) {
   const trimmed = url.trim();
   if (!trimmed) return "";
   return trimmed.replace(/\/+$/, "");
+}
+
+async function proxyOllamaRequest(req, res) {
+  const corsHeaders = buildCorsHeaders();
+  const method = req.method || "GET";
+
+  const originalUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  let pathname = originalUrl.pathname.replace(/^\/?ollama/, "");
+  if (!pathname.startsWith("/")) {
+    pathname = `/${pathname}`;
+  }
+
+  const headerValue = Array.isArray(req.headers[TARGET_HEADER])
+    ? req.headers[TARGET_HEADER][0]
+    : req.headers[TARGET_HEADER];
+
+  const targetBase =
+    normalizeServerUrl(headerValue) ||
+    normalizeServerUrl(process.env.DEFAULT_SERVER) ||
+    "http://localhost:11434";
+
+  let targetUrl;
+  try {
+    targetUrl = new URL(`${pathname}${originalUrl.search}`, ensureProtocol(targetBase));
+  } catch (error) {
+    res.writeHead(400, buildCorsHeaders({ "Content-Type": "application/json" }));
+    res.end(JSON.stringify({ error: "Ungültige Ziel-URL für Ollama Server." }));
+    return;
+  }
+
+  try {
+    const headers = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+      const lower = key.toLowerCase();
+      if ([TARGET_HEADER, "host", "connection", "transfer-encoding"].includes(lower)) {
+        continue;
+      }
+      headers[key] = value;
+    }
+
+    const fetchOptions = {
+      method,
+      headers,
+    };
+
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+      fetchOptions.signal = AbortSignal.timeout(60_000);
+    }
+
+    if (!["GET", "HEAD"].includes(method.toUpperCase())) {
+      fetchOptions.body = req;
+      fetchOptions.duplex = "half";
+    }
+
+    const proxyResponse = await fetch(targetUrl, fetchOptions);
+
+    const responseHeaders = {};
+    proxyResponse.headers.forEach((value, key) => {
+      if (!["transfer-encoding"].includes(key.toLowerCase())) {
+        responseHeaders[key] = value;
+      }
+    });
+
+    res.writeHead(proxyResponse.status, { ...corsHeaders, ...responseHeaders });
+    if (method === "HEAD") {
+      res.end();
+      return;
+    }
+
+    if (!proxyResponse.body) {
+      res.end();
+      return;
+    }
+
+    for await (const chunk of proxyResponse.body) {
+      res.write(chunk);
+    }
+    res.end();
+  } catch (error) {
+    console.error("Proxy error:", error);
+    res.writeHead(502, buildCorsHeaders({ "Content-Type": "application/json" }));
+    res.end(
+      JSON.stringify({
+        error: "Fehler beim Verbinden zum Ollama Server.",
+        details: error.message,
+      })
+    );
+  }
+}
+
+function ensureProtocol(url) {
+  if (!/^https?:\/\//i.test(url)) {
+    return `http://${url.replace(/^\/+/, "")}`;
+  }
+  return url;
 }
 
 module.exports = server;

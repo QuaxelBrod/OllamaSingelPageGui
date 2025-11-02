@@ -415,6 +415,29 @@ function sanitizeServerUrl(value) {
   return value.replace(/\/+$/, "");
 }
 
+function getActiveServerUrl() {
+  return sanitizeServerUrl(state.serverUrl || DEFAULT_SERVER);
+}
+
+function buildOllamaPath(path) {
+  if (!path) return "/";
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+function ollamaFetch(path, options = {}) {
+  const finalPath = buildOllamaPath(path);
+  const target = getActiveServerUrl();
+  const headers = new Headers(options.headers || {});
+  headers.set("X-Ollama-Server", target);
+
+  const merged = {
+    ...options,
+    headers,
+  };
+
+  return fetch(`/ollama${finalPath}`, merged);
+}
+
 function populateModelSelect(select, models, currentValue, allowEmpty = false) {
   const wasFocused = document.activeElement === select;
   select.innerHTML = "";
@@ -470,10 +493,8 @@ function populateModelSelect(select, models, currentValue, allowEmpty = false) {
 }
 
 async function refreshModels({ notifyOnSuccess }) {
-  const url = sanitizeServerUrl(state.serverUrl || DEFAULT_SERVER);
-  const endpoint = `${url}/api/tags`;
   try {
-    const response = await fetch(endpoint);
+    const response = await ollamaFetch("/api/tags");
     if (!response.ok) {
       throw new Error(`Server antwortete mit Status ${response.status}`);
     }
@@ -612,9 +633,6 @@ async function handleMessageSubmit(event) {
 }
 
 async function streamChatCompletion(chat, thinkingMessage, signal) {
-  const url = sanitizeServerUrl(state.serverUrl || DEFAULT_SERVER);
-  const endpoint = `${url}/api/chat`;
-
   const payload = {
     model: chat.model || state.defaultModel,
     messages: chat.messages
@@ -625,7 +643,7 @@ async function streamChatCompletion(chat, thinkingMessage, signal) {
     options: buildOptionsFromParams(chat.params),
   };
 
-  const response = await fetch(endpoint, {
+  const response = await ollamaFetch("/api/chat", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
