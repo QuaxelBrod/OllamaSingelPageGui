@@ -31,11 +31,17 @@ const ALLOWED_HEADERS = "Content-Type, X-Ollama-Server, Authorization";
 const server = http.createServer(async (req, res) => {
   try {
     const { method = "GET" } = req;
+    const originalPath = (req.url || "/").split("?")[0] || "/";
     const requestPath = sanitizePath(req.url || "/");
 
     if (method === "OPTIONS") {
       res.writeHead(204, buildCorsHeaders());
       res.end();
+      return;
+    }
+
+    if (isOllamaRoute(originalPath)) {
+      await proxyOllamaRequest(req, res);
       return;
     }
 
@@ -51,11 +57,6 @@ const server = http.createServer(async (req, res) => {
         })
       );
       res.end(body);
-      return;
-    }
-
-    if (requestPath.startsWith("ollama/")) {
-      await proxyOllamaRequest(req, res);
       return;
     }
 
@@ -124,6 +125,11 @@ function sanitizePath(urlPath) {
   } catch (error) {
     return "index.html";
   }
+}
+
+function isOllamaRoute(pathname) {
+  if (!pathname) return false;
+  return pathname === "/ollama" || pathname.startsWith("/ollama/");
 }
 
 function shouldServeIndex(requestPath) {
