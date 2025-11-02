@@ -1,5 +1,7 @@
 const STORAGE_KEY = "ollama.chat.state.v1";
-const DEFAULT_SERVER = "http://localhost:11434";
+const DEFAULT_SERVER =
+  (typeof globalThis !== "undefined" && globalThis.__OLLAMA_DEFAULT_SERVER__) ||
+  "http://localhost:11434";
 
 const defaultParams = {
   temperature: 0.7,
@@ -70,7 +72,9 @@ function restoreState() {
 
   state.requestPending = false;
   currentAbortController = null;
-  dom.serverUrlInput.value = state.serverUrl || DEFAULT_SERVER;
+  const restoredServer = sanitizeServerUrl(state.serverUrl || DEFAULT_SERVER);
+  state.serverUrl = restoredServer;
+  dom.serverUrlInput.value = restoredServer;
 }
 
 function persistState() {
