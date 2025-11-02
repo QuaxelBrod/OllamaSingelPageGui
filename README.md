@@ -18,28 +18,35 @@ Der Server läuft anschließend unter `http://localhost:4173`.
 
 ## Docker
 
-### Image bauen
+### Container lokal bauen
 
 ```bash
-docker build -t ollama-chat-console .
+docker build -t ollama-chat-console:latest .
 ```
 
-### Container starten
+Optional kannst du das Image direkt für eine Registry taggen, z. B.:
 
 ```bash
-docker run --rm -p 4173:4173 --name ollama-chat-console ollama-chat-console
+docker tag ollama-chat-console:latest registry.example.com/mein-namespace/ollama-chat-console:latest
+docker push registry.example.com/mein-namespace/ollama-chat-console:latest
 ```
 
-Der Container exponiert Port `4173`. Anschließend ist die App unter `http://localhost:4173` erreichbar.
+### Lokaler Testlauf
 
-## Docker Compose Beispiel
+```bash
+docker run --rm -p 4173:4173 --name ollama-chat-console ollama-chat-console:latest
+```
+
+Die App liegt anschließend unter `http://localhost:4173`.
+
+## Deployment via Docker Compose
+
+Auf dem Zielsystem (z. B. Server) eine `docker-compose.yml` anlegen:
 
 ```yaml
 services:
   ollama-chat-console:
-    image: ollama-chat-console:latest
-    build:
-      context: .
+    image: registry.example.com/mein-namespace/ollama-chat-console:latest
     ports:
       - "4173:4173"
     environment:
@@ -48,5 +55,28 @@ services:
       PORT: 4173
 ```
 
-Nach dem Start mit `docker compose up --build` steht die Weboberfläche im Browser unter `http://localhost:4173`.
+Vor dem Start ggf. bei der Registry anmelden:
 
+```bash
+docker login registry.example.com
+```
+
+Dann das Deployment hochziehen:
+
+```bash
+docker compose up -d
+```
+
+Die Weboberfläche ist anschließend unter `http://<server>:4173` erreichbar.
+
+### Git-Repository auf Zielsystem deployen
+
+Wenn dein Zielserver Zugriff auf dieses Git-Repository hat, kannst du den Code direkt dort klonen und per Compose ausrollen:
+
+```bash
+git clone https://github.com/<dein-user>/<dein-repo>.git
+cd <dein-repo>
+docker compose up -d
+```
+
+*Hinweis:* Passe die Repository-URL an (HTTPS oder SSH). Falls du nicht das veröffentlichte Image verwendest, sondern lokal builden möchtest, füge im Compose-File den `build:`-Abschnitt wieder ein (`build: { context: . }`) und starte dann `docker compose up --build -d`.
