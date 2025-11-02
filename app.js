@@ -1,7 +1,6 @@
 const STORAGE_KEY = "ollama.chat.state.v1";
-const DEFAULT_SERVER =
-  (typeof globalThis !== "undefined" && globalThis.__OLLAMA_DEFAULT_SERVER__) ||
-  "http://localhost:11434";
+const DEFAULT_SERVER_FALLBACK = "http://localhost:11434";
+let backendDefaultServer = DEFAULT_SERVER_FALLBACK;
 
 const defaultParams = {
   temperature: 0.7,
@@ -14,7 +13,7 @@ const defaultParams = {
 
 const dom = {};
 const state = {
-  serverUrl: DEFAULT_SERVER,
+  serverUrl: DEFAULT_SERVER_FALLBACK,
   defaultModel: "",
   activeChatId: null,
   chats: [],
@@ -23,9 +22,12 @@ const state = {
 
 let currentAbortController = null;
 
-function init() {
+async function init() {
   cacheDom();
+  backendDefaultServer = await fetchDefaultServer();
   restoreState();
+  state.serverUrl = sanitizeServerUrl(state.serverUrl || getDefaultServer());
+  dom.serverUrlInput.value = state.serverUrl;
   setRequestPending(false);
   bindEvents();
   ensureChatExists();
@@ -72,9 +74,7 @@ function restoreState() {
 
   state.requestPending = false;
   currentAbortController = null;
-  const restoredServer = sanitizeServerUrl(state.serverUrl || DEFAULT_SERVER);
-  state.serverUrl = restoredServer;
-  dom.serverUrlInput.value = restoredServer;
+  state.serverUrl = sanitizeServerUrl(state.serverUrl || getDefaultServer());
 }
 
 function persistState() {
@@ -410,13 +410,23 @@ function parseIntOrFallback(value) {
   return parseInt(value, 10);
 }
 
+function sanitizeUrl(value, fallback = DEFAULT_SERVER_FALLBACK) {
+  if (!value) return fallback;
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  return trimmed.replace(/\/+$/, "") || fallback;
+}
+
+function getDefaultServer() {
+  return sanitizeUrl(backendDefaultServer, DEFAULT_SERVER_FALLBACK);
+}
+
 function sanitizeServerUrl(value) {
-  if (!value) return DEFAULT_SERVER;
-  return value.replace(/\/+$/, "");
+  return sanitizeUrl(value, getDefaultServer());
 }
 
 function getActiveServerUrl() {
-  return sanitizeServerUrl(state.serverUrl || DEFAULT_SERVER);
+  return sanitizeServerUrl(state.serverUrl || getDefaultServer());
 }
 
 function buildOllamaPath(path) {
@@ -436,6 +446,20 @@ function ollamaFetch(path, options = {}) {
   };
 
   return fetch(`/ollama${finalPath}`, merged);
+}
+
+async function fetchDefaultServer() {
+  try {
+    const response = await fetch("/api/default-server");
+    if (!response.ok) {
+      throw new Error(`unexpected status ${response.status}`);
+    }
+    const data = await response.json();
+    return sanitizeUrl(data?.defaultServer, DEFAULT_SERVER_FALLBACK);
+  } catch (error) {
+    console.warn("Konnte DEFAULT_SERVER nicht vom Backend laden:", error);
+    return DEFAULT_SERVER_FALLBACK;
+  }
 }
 
 function populateModelSelect(select, models, currentValue, allowEmpty = false) {

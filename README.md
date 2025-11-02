@@ -90,7 +90,7 @@ docker compose up -d
 | `PORT`           | Port des Node-Minimalservers                                                                      | `4173`                    |
 | `NODE_ENV`       | Steuert Caching-Header (`production` aktiviert 1h Cache)                                          | `development`             |
 
-`DEFAULT_SERVER` wird vom Server zur Laufzeit in die Seite injiziert, sodass der Browser automatisch diesen Wert nutzt. Beispielsweise:
+`DEFAULT_SERVER` definiert den Standard-Endpunkt, an den der Node-Server die Proxy-Route `/ollama` weiterleitet. Der Browser erfragt diesen Wert zur Initialisierung über `/api/default-server`. Beispielsweise:
 
 ```bash
 DEFAULT_SERVER=http://mein-ollama:11434 npm start

@@ -39,6 +39,21 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (requestPath === "api/default-server") {
+      const body = JSON.stringify({
+        defaultServer:
+          normalizeServerUrl(process.env.DEFAULT_SERVER) || "http://localhost:11434",
+      });
+      res.writeHead(
+        200,
+        buildCorsHeaders({
+          "Content-Type": "application/json",
+        })
+      );
+      res.end(body);
+      return;
+    }
+
     if (requestPath.startsWith("ollama/")) {
       await proxyOllamaRequest(req, res);
       return;
@@ -71,15 +86,9 @@ const server = http.createServer(async (req, res) => {
       filePath = path.join(ROOT_DIR, "index.html");
     }
 
-    const rawData = await fs.readFile(filePath);
+    const payload = await fs.readFile(filePath);
     const ext = path.extname(filePath).toLowerCase();
     const mimeType = MIME_TYPES[ext] || "application/octet-stream";
-
-    let payload = rawData;
-    if (ext === ".html" && path.basename(filePath).toLowerCase() === "index.html") {
-      const injected = injectRuntimeConfig(rawData.toString("utf8"));
-      payload = Buffer.from(injected, "utf8");
-    }
 
     res.writeHead(200, buildHeaders(mimeType));
     if (method === "HEAD") {
@@ -142,21 +151,6 @@ function buildCorsHeaders(additional = {}) {
     "Access-Control-Allow-Headers": ALLOWED_HEADERS,
     ...additional,
   };
-}
-
-function injectRuntimeConfig(html) {
-  const envUrl = normalizeServerUrl(process.env.DEFAULT_SERVER);
-  const fallbackUrl = normalizeServerUrl("http://localhost:11434");
-  const effectiveUrl = envUrl || fallbackUrl;
-  const configScript = `<script>window.__OLLAMA_DEFAULT_SERVER__ = ${JSON.stringify(
-    effectiveUrl
-  )};</script>`;
-
-  if (html.includes("</head>")) {
-    return html.replace("</head>", `${configScript}\n</head>`);
-  }
-
-  return `${configScript}\n${html}`;
 }
 
 function normalizeServerUrl(url) {
