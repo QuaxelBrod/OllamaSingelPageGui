@@ -3,6 +3,8 @@
 const http = require("http");
 const path = require("path");
 const fs = require("fs/promises");
+const { Readable } = require("stream");
+const { pipeline } = require("stream/promises");
 
 const HOST = process.env.HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT) || 4173;
@@ -170,7 +172,7 @@ async function proxyOllamaRequest(req, res) {
   const corsHeaders = buildCorsHeaders();
   const method = req.method || "GET";
 
-  const originalUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const originalUrl = new URL(req.url, `${req.protocol || "http"}://${req.headers.host || "localhost"}`);
   let pathname = originalUrl.pathname.replace(/^\/?ollama/, "");
   if (!pathname.startsWith("/")) {
     pathname = `/${pathname}`;
@@ -209,13 +211,13 @@ async function proxyOllamaRequest(req, res) {
       headers,
     };
 
-    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
-      fetchOptions.signal = AbortSignal.timeout(60_000);
-    }
-
     if (!["GET", "HEAD"].includes(method.toUpperCase())) {
       fetchOptions.body = req;
       fetchOptions.duplex = "half";
+    }
+
+    if (process.env.DEBUG_PROXY === "1") {
+      console.log(`Proxy ${method} ${targetUrl}`);
     }
 
     const proxyResponse = await fetch(targetUrl, fetchOptions);
@@ -238,10 +240,12 @@ async function proxyOllamaRequest(req, res) {
       return;
     }
 
-    for await (const chunk of proxyResponse.body) {
-      res.write(chunk);
-    }
-    res.end();
+    const nodeStream =
+      typeof Readable.fromWeb === "function"
+        ? Readable.fromWeb(proxyResponse.body)
+        : Readable.from(proxyResponse.body);
+
+    await pipeline(nodeStream, res);
   } catch (error) {
     console.error("Proxy error:", error);
     res.writeHead(502, buildCorsHeaders({ "Content-Type": "application/json" }));
@@ -252,6 +256,12 @@ async function proxyOllamaRequest(req, res) {
       })
     );
   }
+
+  res.on("close", () => {
+    if (req.destroyed === false) {
+      req.destroy();
+    }
+  });
 }
 
 function ensureProtocol(url) {
