@@ -118,10 +118,24 @@ textarea:focus {
 
 .chat-list-header {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.8rem;
   padding: 0.9rem;
   border-bottom: 1px solid var(--border);
+}
+
+.chat-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 0.4rem;
+}
+
+.chat-actions .primary-btn,
+.chat-actions .danger-btn {
+  flex: 1;
+  font-size: 0.8rem;
+  padding: 0.4rem 0.6rem;
 }
 
 .chat-list ul {
@@ -239,6 +253,48 @@ textarea:focus {
 .message .thinking {
   font-style: italic;
   color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.thinking.collapsed span.thinking-content {
+  display: none;
+}
+
+.message .stats {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  padding-top: 0.4rem;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.message .stats span {
+  display: inline-flex;
+  justify-content: space-between;
+}
+
+.message-edit {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.1rem 0.35rem;
+  border-radius: 0.4rem;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.message-edit:hover:not(:disabled) {
+  background: rgba(78, 183, 248, 0.12);
+  color: var(--text);
+}
+
+.message-edit:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
 }
 
 .attachments img {
@@ -266,6 +322,28 @@ textarea:focus {
 .message-delete:disabled {
   cursor: not-allowed;
   opacity: 0.4;
+}
+
+.edit-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.edit-container textarea {
+  width: 100%;
+  min-height: 120px;
+}
+
+.edit-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.edit-actions .primary-btn,
+.edit-actions .secondary-btn {
+  flex: 1;
 }
 
 .message-form {
@@ -369,4 +447,28 @@ textarea:focus {
     gap: 0.6rem;
     align-items: stretch;
   }
+}
+label.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 500;
+}
+
+label.toggle input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+.thinking-toggle {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.1rem 0.3rem;
+  border-radius: 0.4rem;
+  font-size: 0.75rem;
+}
+
+.thinking-toggle:hover {
+  background: rgba(78, 183, 248, 0.12);
+  color: var(--text);
 }

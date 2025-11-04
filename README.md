@@ -69,6 +69,34 @@ docker compose up -d
 
 Die Weboberfläche ist anschließend unter `http://<server>:4173` erreichbar.
 
+### Ollama Backend (Docker-Beispiel)
+
+Damit der Chat funktioniert, muss ein Ollama-Server laufen, der von der Web-App erreichbar ist. Beispiel für einen Compose-Service:
+
+```yaml
+services:
+  ollama:
+    image: ollama/ollama
+    container_name: ollama
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    ports:
+      - "11434:11434"
+    volumes:
+      - /opt/docker-services/services/ollama:/root/.ollama
+```
+
+Setze anschließend in der Chat-App `DEFAULT_SERVER=http://ollama:11434` (oder `http://host.docker.internal:11434` beim Betrieb auf Docker Desktop), damit die Proxy-Route `/ollama` den richtigen Host anspricht.
+
 ### Git-Repository auf Zielsystem deployen
 
 Wenn dein Zielserver Zugriff auf dieses Git-Repository hat, kannst du den Code direkt dort klonen und per Compose ausrollen:

@@ -36,9 +36,12 @@
         <aside class="chat-list">
           <div class="chat-list-header">
             <h2>Chats</h2>
-            <button id="delete-chat-btn" class="danger-btn">
-              Ausgewählten Chat löschen
-            </button>
+            <div class="chat-actions">
+              <button id="new-chat-btn" class="primary-btn">Neuer Chat</button>
+              <button id="delete-chat-btn" class="danger-btn">
+                Ausgewählten Chat löschen
+              </button>
+            </div>
           </div>
           <ul id="chat-items"></ul>
         </aside>
@@ -99,6 +102,10 @@
                 >Seed
                 <input type="number" id="param-seed" step="1" />
               </label>
+              <label class="toggle">
+                Thinking aktivieren
+                <input type="checkbox" id="param-showthinking" checked />
+              </label>
             </div>
           </details>
 
@@ -153,11 +160,21 @@
             >
               ✕
             </button>
+            <button
+              type="button"
+              class="message-edit"
+              data-action="edit-message"
+              hidden
+              title="Nachricht bearbeiten"
+            >
+              ✎
+            </button>
           </div>
         </header>
         <div class="content"></div>
         <div class="thinking"></div>
         <div class="attachments"></div>
+        <div class="stats" hidden></div>
       </article>
     </template>
 

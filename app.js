@@ -9,6 +9,7 @@ const defaultParams = {
   repeat_penalty: 1.1,
   mirostat: 0,
   seed: "",
+  show_thinking: true,
 };
 
 const dom = {};
@@ -18,6 +19,9 @@ const state = {
   activeChatId: null,
   chats: [],
   requestPending: false,
+  editingMessageId: null,
+  editingOriginalContent: "",
+  editingDraft: "",
 };
 
 let currentAbortController = null;
@@ -50,6 +54,7 @@ function cacheDom() {
   dom.paramRepeatPenalty = document.getElementById("param-repeatpenalty");
   dom.paramMirostat = document.getElementById("param-mirostat");
   dom.paramSeed = document.getElementById("param-seed");
+  dom.paramShowThinking = document.getElementById("param-showthinking");
   dom.messageList = document.getElementById("message-list");
   dom.messageForm = document.getElementById("message-form");
   dom.messageInput = document.getElementById("message-input");
@@ -75,11 +80,20 @@ function restoreState() {
   state.requestPending = false;
   currentAbortController = null;
   state.serverUrl = sanitizeServerUrl(state.serverUrl || getDefaultServer());
+  state.editingMessageId = null;
+  state.editingOriginalContent = "";
+  state.editingDraft = "";
 }
 
 function persistState() {
   try {
-    const { requestPending, ...persistable } = state;
+    const {
+      requestPending,
+      editingMessageId,
+      editingOriginalContent,
+      editingDraft,
+      ...persistable
+    } = state;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(persistable));
   } catch (err) {
     console.warn("Konnte Zustand nicht speichern:", err);
@@ -149,6 +163,9 @@ function bindEvents() {
   );
   dom.paramSeed.addEventListener("change", () =>
     updateChatParam("seed", dom.paramSeed.value === "" ? "" : parseIntOrFallback(dom.paramSeed.value))
+  );
+  dom.paramShowThinking.addEventListener("change", () =>
+    updateChatParam("show_thinking", dom.paramShowThinking.checked)
   );
 
   dom.chatItems.addEventListener("click", (event) => {
@@ -233,6 +250,8 @@ function renderChatMeta() {
       chat.params?.repeat_penalty ?? defaultParams.repeat_penalty;
     dom.paramMirostat.value = chat.params?.mirostat ?? defaultParams.mirostat;
     dom.paramSeed.value = chat.params?.seed ?? defaultParams.seed;
+    dom.paramShowThinking.checked =
+      chat.params?.show_thinking ?? defaultParams.show_thinking;
   } else {
     dom.chatTitleInput.value = "";
     dom.chatModelSelect.innerHTML = "";
@@ -242,6 +261,7 @@ function renderChatMeta() {
     dom.paramRepeatPenalty.value = "";
     dom.paramMirostat.value = "";
     dom.paramSeed.value = "";
+    dom.paramShowThinking.checked = true;
     dom.messageInput.disabled = true;
   }
 
@@ -272,6 +292,9 @@ function renderMessages() {
 
   const template = document.getElementById("message-template");
   chat.messages.forEach((message) => {
+    if (message.purpose === "thinking" && message.showThinking === false) {
+      return;
+    }
     const node = template.content.cloneNode(true);
     const article = node.querySelector(".message");
     article.dataset.messageId = message.id;
@@ -293,7 +316,13 @@ function renderMessages() {
     node.querySelector(".role").textContent = roleLabel;
     node.querySelector(".timestamp").textContent = formatTime(message.createdAt);
     const contentEl = node.querySelector(".content");
-    contentEl.textContent = message.content ?? "";
+    const isEditing = state.editingMessageId === message.id;
+    if (isEditing) {
+      contentEl.hidden = true;
+    } else {
+      contentEl.hidden = false;
+      contentEl.textContent = message.content ?? "";
+    }
 
     const deleteBtn = node.querySelector(".message-delete");
     if (deleteBtn) {
@@ -302,20 +331,102 @@ function renderMessages() {
       deleteBtn.hidden = false;
     }
 
+    const editBtn = node.querySelector(".message-edit");
+    if (editBtn) {
+      if (message.role === "user" && message.id === getLastUserMessageId(chat)) {
+        editBtn.dataset.messageId = message.id;
+        editBtn.disabled = state.requestPending;
+        editBtn.hidden = false;
+      } else {
+        editBtn.hidden = true;
+      }
+    }
+
+    const statsEl = node.querySelector(".stats");
+    if (statsEl) {
+      if (message.stats && message.role === "assistant") {
+        statsEl.hidden = false;
+        statsEl.innerHTML = renderStats(message.stats);
+      } else {
+        statsEl.hidden = true;
+      }
+    }
+
+    // Inline editing UI
+    if (isEditing) {
+      const editContainer = document.createElement("div");
+      editContainer.className = "edit-container";
+      const textarea = document.createElement("textarea");
+      textarea.value = state.editingDraft ?? message.content ?? "";
+      textarea.rows = 4;
+      textarea.addEventListener("input", () => {
+        state.editingDraft = textarea.value;
+      });
+
+      const actions = document.createElement("div");
+      actions.className = "edit-actions";
+
+      const cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.className = "secondary-btn";
+      cancelBtn.textContent = "Abbrechen";
+      cancelBtn.addEventListener("click", cancelEditMessage);
+
+      const saveBtn = document.createElement("button");
+      saveBtn.type = "button";
+      saveBtn.className = "primary-btn";
+      saveBtn.textContent = "Aktualisieren & senden";
+      saveBtn.addEventListener("click", () => {
+        submitEditedMessage();
+      });
+
+      if (state.requestPending) {
+        cancelBtn.disabled = true;
+        saveBtn.disabled = true;
+      }
+
+      actions.append(cancelBtn, saveBtn);
+      editContainer.append(textarea, actions);
+      article.insertBefore(editContainer, node.querySelector(".thinking"));
+    }
+
     const thinkingEl = node.querySelector(".thinking");
     const thinkingText = typeof message.thinking === "string" ? message.thinking.trim() : "";
-    if (thinkingText) {
-      thinkingEl.textContent = thinkingText;
-      thinkingEl.hidden = false;
-    } else if (message.pending) {
-      thinkingEl.textContent =
-        message.content && message.content.length
+    if (thinkingEl) {
+      thinkingEl.innerHTML = "";
+      if (thinkingText || message.pending) {
+        thinkingEl.hidden = false;
+
+        const toggleBtn = document.createElement("button");
+        toggleBtn.type = "button";
+        toggleBtn.className = "thinking-toggle";
+        toggleBtn.textContent = message.collapsed ? "▼" : "▲";
+
+        const contentSpan = document.createElement("span");
+        contentSpan.className = "thinking-content";
+        contentSpan.textContent = thinkingText
+          ? thinkingText
+          : message.content && message.content.length
           ? "Antwort wird generiert …"
           : "Denkt nach …";
-      thinkingEl.hidden = false;
-    } else {
-      thinkingEl.textContent = "";
-      thinkingEl.hidden = true;
+
+        if (message.collapsed) {
+          thinkingEl.classList.add("collapsed");
+        } else {
+          thinkingEl.classList.remove("collapsed");
+        }
+
+        toggleBtn.addEventListener("click", () => {
+          message.collapsed = !message.collapsed;
+          persistState();
+          renderMessages();
+        });
+
+        thinkingEl.appendChild(toggleBtn);
+        thinkingEl.appendChild(contentSpan);
+      } else {
+        thinkingEl.hidden = true;
+      }
     }
 
     let attachmentsEl = node.querySelector(".attachments");
@@ -562,6 +673,10 @@ async function handleMessageSubmit(event) {
     showStatus("Bitte warte, bis die aktuelle Antwort beendet ist.", "error", 2500);
     return;
   }
+  if (state.editingMessageId) {
+    showStatus("Bitte schließe zuerst die Bearbeitung der letzten Nachricht ab.", "error", 2500);
+    return;
+  }
   const chat = getActiveChat();
   if (!chat) {
     showStatus("Kein aktiver Chat verfügbar", "error", 3000);
@@ -610,11 +725,16 @@ async function handleMessageSubmit(event) {
     pending: true,
     thinking: "",
     purpose: "thinking",
+    showThinking: Boolean(chat.params?.show_thinking ?? true),
+    collapsed: false,
   };
 
   chat.messages.push(userMessage, thinkingMessage);
   chat.updatedAt = now;
   dom.messageInput.value = "";
+  state.editingMessageId = null;
+  state.editingOriginalContent = "";
+  state.editingDraft = "";
   setRequestPending(true);
   currentAbortController = new AbortController();
   persistState();
@@ -693,6 +813,8 @@ async function streamChatCompletion(chat, thinkingMessage, signal) {
 
   thinkingMessage.pending = true;
   thinkingMessage.thinking = thinkingMessage.thinking || "";
+  thinkingMessage.showThinking = Boolean(chat.params?.show_thinking ?? true);
+  thinkingMessage.collapsed = false;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -751,6 +873,7 @@ function serializeMessageForRequest(message) {
 
 function handleStreamPayload(line, context) {
   const { thinkingMessage, responseState } = context;
+  const showThinking = Boolean(thinkingMessage.showThinking);
   let payload;
   try {
     payload = JSON.parse(line);
@@ -765,7 +888,7 @@ function handleStreamPayload(line, context) {
 
   let changed = false;
   let updatedThinking = false;
-  if (typeof payload.thinking === "string" && payload.thinking.length) {
+  if (showThinking && typeof payload.thinking === "string" && payload.thinking.length) {
     responseState.thinking = mergeThinkingText(responseState.thinking || "", payload.thinking);
     thinkingMessage.thinking = responseState.thinking.trimStart();
     thinkingMessage.pending = !payload.done;
@@ -773,7 +896,7 @@ function handleStreamPayload(line, context) {
     changed = true;
   }
 
-  if (!updatedThinking) {
+  if (showThinking && !updatedThinking) {
     const fragments = extractThinkingFragments(payload);
     if (fragments.length) {
       fragments.forEach((fragment) => {
@@ -798,6 +921,9 @@ function handleStreamPayload(line, context) {
 
   if (responseChunk) {
     responseState.text += responseChunk;
+    if (showThinking) {
+      thinkingMessage.content = responseState.text;
+    }
     changed = true;
   }
 
@@ -835,6 +961,9 @@ function finalizeStream(chat, thinkingMessage, responseState) {
     thinkingMessage.thinking = split.thinking;
   }
 
+  thinkingMessage.content = "";
+  thinkingMessage.collapsed = true;
+
   const finalThinking = (thinkingMessage.thinking || "").trim();
   if (!finalThinking) {
     chat.messages = chat.messages.filter((message) => message.id !== thinkingMessage.id);
@@ -842,23 +971,24 @@ function finalizeStream(chat, thinkingMessage, responseState) {
 
   let finalContent = (split ? split.answer : responseState.text || "").trim();
   if (responseState.stats) {
-    const statsBlock = formatStatsSection(responseState.stats);
-    finalContent = finalContent ? `${finalContent}\n\n${statsBlock}` : statsBlock;
+    responseState.stats.model = chat.model || state.defaultModel;
   }
 
   const hasAttachments =
     Array.isArray(responseState.attachments) && responseState.attachments.length > 0;
 
-  if (finalContent || hasAttachments) {
-    const assistantMessage = {
-      id: createId(),
-      role: "assistant",
-      content: finalContent,
-      createdAt: new Date().toISOString(),
-      attachments: hasAttachments ? responseState.attachments : [],
-      pending: false,
-      purpose: "response",
-    };
+  if (finalContent || hasAttachments || responseState.stats) {
+  const assistantMessage = {
+    id: createId(),
+    role: "assistant",
+    content: finalContent,
+    createdAt: new Date().toISOString(),
+    attachments: hasAttachments ? responseState.attachments : [],
+    pending: false,
+    purpose: "response",
+    stats: responseState.stats || null,
+  };
+  assistantMessage.relatedThinkingId = thinkingMessage.id;
     chat.messages.push(assistantMessage);
   }
 
@@ -923,37 +1053,36 @@ function extractStats(payload) {
   return Object.keys(stats).length ? stats : null;
 }
 
-function formatStatsSection(stats) {
+function renderStats(stats) {
   if (!stats) return "";
 
-  const lines = ["---", "Statistiken:"];
+  const totalMs = toMilliseconds(stats.total_duration);
+  const loadMs = toMilliseconds(stats.load_duration);
+  const promptTokens = stats.prompt_eval_count ?? 0;
+  const evalTokens = stats.eval_count ?? 0;
+  const evalMs = toMilliseconds(stats.eval_duration);
 
-  if (typeof stats.done_reason === "string") {
-    lines.push(`- Beendigungsgrund: ${stats.done_reason}`);
-  }
-  if (typeof stats.total_duration === "number") {
-    lines.push(`- Gesamtdauer: ${formatDuration(stats.total_duration)}`);
-  }
-  if (typeof stats.load_duration === "number") {
-    lines.push(`- Ladedauer: ${formatDuration(stats.load_duration)}`);
-  }
-  if (typeof stats.prompt_eval_count === "number") {
-    lines.push(`- Prompt-Tokens: ${stats.prompt_eval_count}`);
-  }
-  if (typeof stats.prompt_eval_duration === "number") {
-    lines.push(`- Prompt-Dauer: ${formatDuration(stats.prompt_eval_duration)}`);
-  }
-  if (typeof stats.eval_count === "number") {
-    lines.push(`- Antwort-Tokens: ${stats.eval_count}`);
-  }
-  if (typeof stats.eval_duration === "number") {
-    lines.push(`- Antwort-Dauer: ${formatDuration(stats.eval_duration)}`);
-  }
-  if (Array.isArray(stats.context)) {
-    lines.push(`- Kontext-Länge: ${stats.context.length}`);
-  }
+  const totalSeconds = totalMs ? totalMs / 1000 : 0;
+  const tokensPerSecond =
+    evalTokens && totalSeconds > 0 ? (evalTokens / totalSeconds).toFixed(2) : "-";
 
-  return lines.join("\n");
+  const entries = [
+    { label: "Gesamtdauer", value: formatDuration(stats.total_duration) },
+    {
+      label: "Time to First Token",
+      value: loadMs !== null ? formatDuration(stats.load_duration) : "-",
+    },
+    { label: "Tokens pro Sekunde", value: tokensPerSecond },
+    { label: "Tokens (Frage)", value: promptTokens },
+    { label: "Tokens (Antwort)", value: evalTokens },
+  ];
+
+  return entries
+    .map(
+      (entry) =>
+        `<span><span>${entry.label}</span><span>${entry.value}</span></span>`
+    )
+    .join("");
 }
 
 function formatDuration(nanoseconds) {
@@ -975,6 +1104,11 @@ function formatDuration(nanoseconds) {
   return `${microseconds.toFixed(2)} µs`;
 }
 
+function toMilliseconds(value) {
+  if (typeof value !== "number") return null;
+  return value / 1e6;
+}
+
 function buildOptionsFromParams(params = {}) {
   const options = {};
   if (params.temperature !== "" && params.temperature !== undefined) {
@@ -994,6 +1128,10 @@ function buildOptionsFromParams(params = {}) {
   }
   if (params.seed !== "" && params.seed !== undefined) {
     options.seed = Number(params.seed);
+  }
+  if (typeof params.show_thinking === "boolean") {
+    options.include_thinking = params.show_thinking;
+    options.thinking = params.show_thinking;
   }
   return options;
 }
@@ -1106,6 +1244,12 @@ function handleCancelRequest() {
   try {
     currentAbortController.abort();
     showStatus("Generierung wird abgebrochen …", "info", 2000);
+    const chat = getActiveChat();
+    if (chat) {
+      removeThinkingMessage(chat);
+      persistState();
+      renderMessages();
+    }
   } catch (error) {
     console.error("Abbruch nicht möglich:", error);
   } finally {
@@ -1117,25 +1261,184 @@ function handleCancelRequest() {
 
 function handleMessageListClick(event) {
   const button = event.target.closest('button[data-action="delete-message"]');
-  if (!button) {
+  const editButton = event.target.closest('button[data-action="edit-message"]');
+
+  if (button) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (state.requestPending) {
+      showStatus("Während einer laufenden Antwort können keine Nachrichten gelöscht werden.", "error", 2500);
+      return;
+    }
+
+    const messageId = button.dataset.messageId;
+    const chat = getActiveChat();
+    if (!chat || !messageId) {
+      return;
+    }
+
+    deleteMessageById(chat, messageId);
+    removeThinkingMessage(chat);
+    persistState();
+    renderMessages();
+    renderChatList();
     return;
   }
 
-  event.preventDefault();
-  event.stopPropagation();
+  if (editButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    handleEditMessage(editButton.dataset.messageId);
+  }
+}
 
+function removeThinkingMessage(chat, targetId) {
+  if (!chat) return;
+  const thinkingId =
+    targetId ||
+    chat.messages.find((msg) => msg.purpose === "thinking")?.id;
+  if (!thinkingId) return;
+
+  const idx = chat.messages.findIndex((msg) => msg.id === thinkingId);
+  if (idx !== -1) {
+    chat.messages.splice(idx, 1);
+  }
+}
+
+function handleEditMessage(messageId) {
   if (state.requestPending) {
-    showStatus("Während einer laufenden Antwort können keine Nachrichten gelöscht werden.", "error", 2500);
+    showStatus("Während einer laufenden Antwort kann nicht bearbeitet werden.", "error", 2500);
     return;
   }
 
-  const messageId = button.dataset.messageId;
   const chat = getActiveChat();
-  if (!chat || !messageId) {
+  if (!chat) return;
+  const message = chat.messages.find((msg) => msg.id === messageId && msg.role === "user");
+  if (!message) return;
+
+  if (message.id !== getLastUserMessageId(chat)) {
+    showStatus("Nur die letzte Nachricht kann bearbeitet werden.", "error", 2500);
     return;
   }
 
-  deleteMessageById(chat, messageId);
+  if (state.editingMessageId && state.editingMessageId !== messageId) {
+    showStatus("Bitte schließe zuerst die laufende Bearbeitung ab.", "error", 2500);
+    return;
+  }
+
+  if (state.editingMessageId === messageId) {
+    cancelEditMessage(false);
+    return;
+  }
+
+  state.editingMessageId = messageId;
+  state.editingOriginalContent = message.content ?? "";
+  state.editingDraft = message.content ?? "";
+  persistState();
+  renderMessages();
+  showStatus("Nachricht kann bearbeitet und erneut gesendet werden.", "success", 2000);
+}
+
+function cancelEditMessage(showNotification = true) {
+  if (!state.editingMessageId) return;
+  const chat = getActiveChat();
+  if (chat && state.editingOriginalContent !== "") {
+    const msg = chat.messages.find((m) => m.id === state.editingMessageId);
+    if (msg) {
+      msg.content = state.editingOriginalContent;
+    }
+  }
+  state.editingMessageId = null;
+  state.editingOriginalContent = "";
+  state.editingDraft = "";
+  persistState();
+  renderMessages();
+  if (showNotification) {
+    showStatus("Bearbeitung abgebrochen.", "info", 2000);
+  }
+}
+
+async function submitEditedMessage() {
+  if (!state.editingMessageId) return;
+  if (state.requestPending) {
+    showStatus("Bitte warte, bis die aktuelle Antwort beendet ist.", "error", 2500);
+    return;
+  }
+
+  const chat = getActiveChat();
+  if (!chat) return;
+
+  const msgIndex = chat.messages.findIndex((msg) => msg.id === state.editingMessageId);
+  if (msgIndex === -1) {
+    cancelEditMessage(false);
+    return;
+  }
+
+  const message = chat.messages[msgIndex];
+  const newContent = (state.editingDraft ?? message.content ?? "").trim();
+  if (!newContent) {
+    showStatus("Nachricht darf nicht leer sein.", "error", 2500);
+    return;
+  }
+
+  if (newContent === (state.editingOriginalContent ?? "").trim()) {
+    cancelEditMessage(false);
+    return;
+  }
+
+  message.content = newContent;
+  message.updatedAt = new Date().toISOString();
+
+  removeResponsesAfter(chat, msgIndex);
+
+  const now = new Date().toISOString();
+  const thinkingMessage = {
+    id: createId(),
+    role: "assistant",
+    content: "",
+    createdAt: now,
+    attachments: [],
+    pending: true,
+    thinking: "",
+    purpose: "thinking",
+    showThinking: Boolean(chat.params?.show_thinking ?? true),
+    collapsed: false,
+  };
+
+  chat.messages.splice(msgIndex + 1, 0, thinkingMessage);
+  chat.updatedAt = now;
+
+  state.editingMessageId = null;
+  state.editingOriginalContent = "";
+  state.editingDraft = "";
+
+  setRequestPending(true);
+  currentAbortController = new AbortController();
+  persistState();
+  renderMessages();
+  renderChatList();
+
+  showStatus("Nachricht aktualisiert, Anfrage wird erneut gesendet …", "success", 2000);
+
+  try {
+    await streamChatCompletion(chat, thinkingMessage, currentAbortController.signal);
+  } catch (error) {
+    thinkingMessage.pending = false;
+    thinkingMessage.error = error.message;
+    thinkingMessage.content =
+      thinkingMessage.content || `Fehler bei der Antwort: ${error.message}`;
+    chat.updatedAt = new Date().toISOString();
+    showStatus(error.message, "error");
+  } finally {
+    if (currentAbortController) {
+      currentAbortController = null;
+    }
+    setRequestPending(false);
+    persistState();
+    renderMessages();
+    renderChatList();
+  }
 }
 
 function setRequestPending(isPending) {
@@ -1173,9 +1476,12 @@ function deleteMessageById(chat, messageId) {
 
   const [removed] = chat.messages.splice(index, 1);
   chat.updatedAt = new Date().toISOString();
-  persistState();
-  renderMessages();
-  renderChatList();
+  if (removed && removed.relatedThinkingId) {
+    const thinkingIndex = chat.messages.findIndex((msg) => msg.id === removed.relatedThinkingId);
+    if (thinkingIndex !== -1) {
+      chat.messages.splice(thinkingIndex, 1);
+    }
+  }
 
   if (removed.role === "assistant") {
     const previousUser = findPreviousUserMessage(chat.messages, index - 1);
@@ -1208,6 +1514,26 @@ function findPreviousUserMessage(messages, startIndex) {
   }
 
   return null;
+}
+
+function getLastUserMessageId(chat) {
+  if (!chat) return null;
+  for (let i = chat.messages.length - 1; i >= 0; i -= 1) {
+    if (chat.messages[i]?.role === "user") {
+      return chat.messages[i].id;
+    }
+  }
+  return null;
+}
+
+function removeResponsesAfter(chat, userIndex) {
+  if (!chat) return;
+  for (let i = chat.messages.length - 1; i > userIndex; i -= 1) {
+    const msg = chat.messages[i];
+    if (msg.role === "assistant" || msg.purpose === "thinking") {
+      chat.messages.splice(i, 1);
+    }
+  }
 }
 
 function createId() {

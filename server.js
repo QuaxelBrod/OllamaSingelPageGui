@@ -219,9 +219,12 @@ async function proxyOllamaRequest(req, res) {
     if (process.env.DEBUG_PROXY === "1") {
       console.log(`Proxy ${method} ${targetUrl}`);
     }
-
+    
     const proxyResponse = await fetch(targetUrl, fetchOptions);
-
+    
+    if (process.env.DEBUG_PROXY === "1") {
+      console.log(`Proxy result ${proxyResponse.status} ${proxyResponse.statusText}`);
+    }
     const responseHeaders = {};
     proxyResponse.headers.forEach((value, key) => {
       if (!["transfer-encoding"].includes(key.toLowerCase())) {
@@ -230,6 +233,9 @@ async function proxyOllamaRequest(req, res) {
     });
 
     res.writeHead(proxyResponse.status, { ...corsHeaders, ...responseHeaders });
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    }
     if (method === "HEAD") {
       res.end();
       return;
@@ -245,7 +251,14 @@ async function proxyOllamaRequest(req, res) {
         ? Readable.fromWeb(proxyResponse.body)
         : Readable.from(proxyResponse.body);
 
-    await pipeline(nodeStream, res);
+    try {
+      await pipeline(nodeStream, res);
+    } catch (streamError) {
+      if (streamError.code !== "ERR_STREAM_PREMATURE_CLOSE") {
+        console.error("Proxy stream error:", streamError);
+      }
+      res.destroy();
+    }
   } catch (error) {
     console.error("Proxy error:", error);
     res.writeHead(502, buildCorsHeaders({ "Content-Type": "application/json" }));

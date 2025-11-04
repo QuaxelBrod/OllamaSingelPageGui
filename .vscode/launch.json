@@ -12,7 +12,8 @@
       "env": {
         "NODE_ENV": "development",
         "PORT": "4173",
-        "HOST": "0.0.0.0"
+        "HOST": "0.0.0.0",
+        "DEBUG_PROXY": "1"
       },
       "restart": true
     },
