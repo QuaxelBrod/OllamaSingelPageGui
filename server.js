@@ -395,31 +395,33 @@ function normalizeBasePath(value) {
 }
 
 function getRelativePath(pathname) {
+  const normalizedPath = pathname || "/";
   if (!BASE_PATH) {
     return {
       matchesBasePath: true,
-      relativePathname: pathname || "/",
+      relativePathname: normalizedPath,
     };
   }
 
-  if (pathname === BASE_PATH) {
+  if (normalizedPath === BASE_PATH) {
     return {
       matchesBasePath: true,
       relativePathname: "/",
     };
   }
 
-  if (pathname.startsWith(`${BASE_PATH}/`)) {
-    const stripped = pathname.slice(BASE_PATH.length) || "/";
+  if (normalizedPath.startsWith(`${BASE_PATH}/`)) {
+    const stripped = normalizedPath.slice(BASE_PATH.length) || "/";
     return {
       matchesBasePath: true,
       relativePathname: stripped.startsWith("/") ? stripped : `/${stripped}`,
     };
   }
 
+  // Support reverse proxies that strip the base path before forwarding.
   return {
-    matchesBasePath: false,
-    relativePathname: pathname,
+    matchesBasePath: true,
+    relativePathname: normalizedPath,
   };
 }
 
