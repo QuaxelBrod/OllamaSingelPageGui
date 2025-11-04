@@ -274,40 +274,19 @@ async function proxyOllamaRequest(req, res) {
       responseHeaders[key] = value;
     });
 
+    res.writeHead(proxyResponse.status, { ...corsHeaders, ...responseHeaders });
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    }
+
     if (method === "HEAD") {
-      res.writeHead(proxyResponse.status, { ...corsHeaders, ...responseHeaders });
       res.end();
       return;
     }
 
     if (!proxyResponse.body) {
-      res.writeHead(proxyResponse.status, { ...corsHeaders, ...responseHeaders });
       res.end();
       return;
-    }
-
-    const contentType =
-      responseHeaders["content-type"] ??
-      proxyResponse.headers.get("content-type") ??
-      "";
-    const shouldBuffer = shouldBufferResponse(contentType);
-
-    if (shouldBuffer) {
-      const arrayBuffer = await proxyResponse.arrayBuffer();
-      const bodyBuffer = Buffer.from(arrayBuffer);
-      const bufferedHeaders = {
-        ...corsHeaders,
-        ...responseHeaders,
-        "Content-Length": String(bodyBuffer.byteLength),
-      };
-      res.writeHead(proxyResponse.status, bufferedHeaders);
-      res.end(bodyBuffer);
-      return;
-    }
-
-    res.writeHead(proxyResponse.status, { ...corsHeaders, ...responseHeaders });
-    if (typeof res.flushHeaders === "function") {
-      res.flushHeaders();
     }
 
     const nodeStream =
@@ -346,16 +325,6 @@ function ensureProtocol(url) {
     return `http://${url.replace(/^\/+/, "")}`;
   }
   return url;
-}
-
-function shouldBufferResponse(contentType) {
-  if (!contentType) return false;
-  const lower = contentType.toLowerCase();
-  if (lower.includes("ndjson")) return false;
-  if (lower.includes("text/event-stream")) return false;
-  if (lower.includes("application/json")) return true;
-  if (lower.includes("+json")) return true;
-  return false;
 }
 
 module.exports = server;
