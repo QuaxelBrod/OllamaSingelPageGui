@@ -231,7 +231,7 @@ async function proxyOllamaRequest(req, res) {
     if (process.env.DEBUG_PROXY === "1") {
       console.log(`Result ${proxyResponse.status} ${proxyResponse.statusText}`);
       // log body response for streaming
-      const reader = stream.getReader();
+      const reader = proxyResponse.getReader();
       const decoder = new TextDecoder();
       let chunk;
 
