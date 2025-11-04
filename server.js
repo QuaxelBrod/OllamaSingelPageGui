@@ -203,6 +203,7 @@ async function proxyOllamaRequest(req, res) {
       if ([TARGET_HEADER, "host", "connection", "transfer-encoding"].includes(lower)) {
         continue;
       }
+      console.log(`Proxy header: ${key}: ${value}`);
       headers[key] = value;
     }
 

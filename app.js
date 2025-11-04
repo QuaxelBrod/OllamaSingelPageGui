@@ -292,15 +292,13 @@ function renderMessages() {
 
   const template = document.getElementById("message-template");
   chat.messages.forEach((message) => {
-    if (message.purpose === "thinking" && message.showThinking === false) {
-      return;
-    }
     const node = template.content.cloneNode(true);
     const article = node.querySelector(".message");
     article.dataset.messageId = message.id;
     article.classList.add(message.role);
     const isThinkingMessage = message.purpose === "thinking";
-    if (message.pending || isThinkingMessage) {
+    const showThinkingBubble = isThinkingMessage && message.showThinking !== false;
+    if (message.pending || showThinkingBubble) {
       article.classList.add("thinking");
     }
     if (message.error) {
@@ -310,7 +308,7 @@ function renderMessages() {
     const roleLabel =
       message.role === "user"
         ? "Du"
-        : isThinkingMessage
+        : showThinkingBubble
         ? "Assistent • Thinking"
         : "Assistent";
     node.querySelector(".role").textContent = roleLabel;
@@ -319,6 +317,9 @@ function renderMessages() {
     const isEditing = state.editingMessageId === message.id;
     if (isEditing) {
       contentEl.hidden = true;
+    } else if (isThinkingMessage && message.showThinking === false) {
+      contentEl.hidden = false;
+      contentEl.textContent = message.content || message.thinking || "";
     } else {
       contentEl.hidden = false;
       contentEl.textContent = message.content ?? "";
@@ -394,7 +395,7 @@ function renderMessages() {
     const thinkingText = typeof message.thinking === "string" ? message.thinking.trim() : "";
     if (thinkingEl) {
       thinkingEl.innerHTML = "";
-      if (thinkingText || message.pending) {
+      if (showThinkingBubble && (thinkingText || message.pending)) {
         thinkingEl.hidden = false;
 
         const toggleBtn = document.createElement("button");
@@ -921,9 +922,7 @@ function handleStreamPayload(line, context) {
 
   if (responseChunk) {
     responseState.text += responseChunk;
-    if (showThinking) {
-      thinkingMessage.content = responseState.text;
-    }
+    thinkingMessage.content = responseState.text;
     changed = true;
   }
 
@@ -959,6 +958,20 @@ function finalizeStream(chat, thinkingMessage, responseState) {
   const split = splitThinkingFromAnswer(responseState.text || "");
   if (split && split.thinking) {
     thinkingMessage.thinking = split.thinking;
+  }
+
+  if (thinkingMessage.showThinking === false) {
+    const finalContent = (split ? split.answer : responseState.text || "").trim();
+    thinkingMessage.role = "assistant";
+    thinkingMessage.purpose = "response";
+    thinkingMessage.pending = false;
+    thinkingMessage.thinking = "";
+    thinkingMessage.content = finalContent;
+    thinkingMessage.attachments = responseState.attachments || [];
+    thinkingMessage.stats = responseState.stats || null;
+    thinkingMessage.collapsed = false;
+    chat.updatedAt = new Date().toISOString();
+    return;
   }
 
   thinkingMessage.content = "";
