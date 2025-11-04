@@ -224,6 +224,7 @@ async function proxyOllamaRequest(req, res) {
       const proxyResponse = await fetch(targetUrl, fetchOptions);
     }
     catch (fetchError) {
+      console.error("Fetch error:", fetchError.toString());
       throw new Error(`Verbindungsfehler zum Ollama Server: ${fetchError}`);
     }
     if (process.env.DEBUG_PROXY === "1") {
