@@ -2,7 +2,8 @@ const STORAGE_KEY = "ollama.chat.state.v1";
 const DEFAULT_SERVER_FALLBACK = "http://localhost:11434";
 let backendDefaultServer = DEFAULT_SERVER_FALLBACK;
 const APP_BASE_PATH = detectInitialBasePath();
-let activeBasePath = APP_BASE_PATH;
+const FALLBACK_LOCATION_BASE = inferFallbackBaseFromLocation();
+let activeBasePath = APP_BASE_PATH || FALLBACK_LOCATION_BASE;
 
 const defaultParams = {
   temperature: 0.7,
@@ -1885,6 +1886,22 @@ function detectInitialBasePath() {
   }
 }
 
+function inferFallbackBaseFromLocation() {
+  if (typeof window === "undefined" || !window.location) {
+    return "";
+  }
+  const pathname = window.location.pathname || "";
+  const segments = pathname.split("/").filter(Boolean);
+  if (!segments.length) {
+    return "";
+  }
+  const first = segments[0];
+  if (!first) {
+    return "";
+  }
+  return normalizeBasePathValue(`/${first}`);
+}
+
 function safeGetPathname(getter) {
   try {
     return getter() || "";
@@ -1978,7 +1995,9 @@ function updateActiveBasePath(value) {
     return;
   }
   if (!normalized) {
-    if (!activeBasePath) {
+    if (!activeBasePath && FALLBACK_LOCATION_BASE) {
+      activeBasePath = FALLBACK_LOCATION_BASE;
+    } else if (!activeBasePath) {
       activeBasePath = "";
     }
     return;
