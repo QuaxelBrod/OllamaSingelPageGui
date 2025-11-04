@@ -1860,22 +1860,22 @@ async function captureImageFromStream(stream, { name }) {
 
 function detectInitialBasePath() {
   try {
+    const scriptElementBase = extractBaseFromScriptElements();
+    if (scriptElementBase) {
+      return scriptElementBase;
+    }
+
     const scriptPath = safeGetPathname(() => new URL(import.meta.url).pathname);
+    const scriptBase = extractBaseFromPath(scriptPath);
+    if (scriptBase) {
+      return scriptBase;
+    }
+
     const locationPath =
       typeof window !== "undefined" && window.location ? window.location.pathname : "";
-    const scriptCandidates = buildPathCandidates(scriptPath);
-    const locationCandidates = buildPathCandidates(locationPath);
-
-    const intersection = findLongestIntersection(scriptCandidates, locationCandidates);
-    if (intersection) {
-      return intersection;
-    }
-
-    if (locationCandidates.length) {
-      return locationCandidates[locationCandidates.length - 1];
-    }
-    if (scriptCandidates.length) {
-      return scriptCandidates[scriptCandidates.length - 1];
+    const locationBase = extractBaseFromPath(locationPath);
+    if (locationBase) {
+      return locationBase;
     }
 
     return "";
@@ -1893,35 +1893,65 @@ function safeGetPathname(getter) {
   }
 }
 
-function buildPathCandidates(pathname) {
-  if (typeof pathname !== "string" || !pathname.length) {
-    return [];
-  }
-  const segments = pathname.split("/").filter(Boolean);
-  if (!segments.length) {
-    return [];
-  }
-  const candidates = [];
-  let current = "";
-  for (const segment of segments) {
-    current = `${current}/${segment}`;
-    candidates.push(current);
-  }
-  return candidates;
-}
-
-function findLongestIntersection(aCandidates, bCandidates) {
-  if (!Array.isArray(aCandidates) || !Array.isArray(bCandidates)) {
+function extractBaseFromScriptElements() {
+  if (
+    typeof document === "undefined" ||
+    !document.getElementsByTagName ||
+    typeof window === "undefined" ||
+    !window.location
+  ) {
     return "";
   }
-  const bSet = new Set(bCandidates);
-  for (let i = aCandidates.length - 1; i >= 0; i -= 1) {
-    const candidate = aCandidates[i];
-    if (bSet.has(candidate)) {
-      return candidate;
+  const scripts = document.getElementsByTagName("script");
+  for (const script of scripts) {
+    if (!script?.src) continue;
+    if (!/app\.js($|\?)/.test(script.src)) {
+      continue;
+    }
+    const pathname = safeGetPathname(() => new URL(script.src, window.location.href).pathname);
+    const base = extractBaseFromPath(pathname);
+    if (base) {
+      return base;
     }
   }
   return "";
+}
+
+function extractBaseFromPath(pathname) {
+  if (typeof pathname !== "string" || !pathname.length) {
+    return "";
+  }
+  let normalized = pathname.trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const queryIndex = normalized.indexOf("?");
+  if (queryIndex >= 0) {
+    normalized = normalized.slice(0, queryIndex);
+  }
+  const hashIndex = normalized.indexOf("#");
+  if (hashIndex >= 0) {
+    normalized = normalized.slice(0, hashIndex);
+  }
+
+  if (!normalized.startsWith("/")) {
+    normalized = `/${normalized}`;
+  }
+
+  normalized = normalized.replace(/\/+$/, "");
+
+  if (!normalized || normalized === "/") {
+    return "";
+  }
+
+  const lastSegment = normalized.split("/").pop();
+  if (lastSegment && lastSegment.includes(".")) {
+    const lastSlash = normalized.lastIndexOf("/");
+    normalized = normalized.slice(0, lastSlash);
+  }
+
+  return normalizeBasePathValue(normalized);
 }
 
 function normalizeBasePathValue(value) {
