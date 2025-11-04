@@ -64,8 +64,7 @@ function cacheDom() {
   dom.messageForm = document.getElementById("message-form");
   dom.messageInput = document.getElementById("message-input");
   dom.imageInput = document.getElementById("image-input");
-  dom.imageActionBtn = document.getElementById("image-action-btn");
-  dom.imageSourceMenu = document.getElementById("image-source-menu");
+  dom.imageSourceSelect = document.getElementById("image-source-select");
   dom.pendingAttachments = document.getElementById("pending-attachments");
   dom.messageSubmit = dom.messageForm?.querySelector('button[type="submit"]');
   dom.cancelRequestBtn = document.getElementById("cancel-request-btn");
@@ -178,11 +177,9 @@ function bindEvents() {
     updateChatParam("show_thinking", dom.paramShowThinking.checked)
   );
 
-  dom.imageActionBtn?.addEventListener("click", toggleImageSourceMenu);
-  dom.imageSourceMenu?.addEventListener("click", handleImageSourceMenuClick);
+  dom.imageSourceSelect?.addEventListener("change", handleImageSourceSelection);
   dom.imageInput?.addEventListener("change", handleImageFileSelection);
   dom.pendingAttachments?.addEventListener("click", handlePendingAttachmentClick);
-  document.addEventListener("click", handleDocumentClickForImageMenu);
 
   dom.chatItems.addEventListener("click", (event) => {
     const li = event.target.closest("li[data-chat-id]");
@@ -1652,64 +1649,29 @@ function createId() {
   return `id-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
-function toggleImageSourceMenu(event) {
-  if (!dom.imageSourceMenu) return;
-  event.preventDefault();
-  event.stopPropagation();
-  if (dom.imageSourceMenu.hidden) {
-    openImageSourceMenu();
-  } else {
-    closeImageSourceMenu();
-  }
-}
-
-function openImageSourceMenu() {
-  if (!dom.imageSourceMenu) return;
-  dom.imageSourceMenu.hidden = false;
-  dom.imageActionBtn?.setAttribute("aria-expanded", "true");
-}
-
-function closeImageSourceMenu() {
-  if (!dom.imageSourceMenu) return;
-  dom.imageSourceMenu.hidden = true;
-  dom.imageActionBtn?.setAttribute("aria-expanded", "false");
-}
-
-function handleDocumentClickForImageMenu(event) {
-  if (!dom.imageSourceMenu || dom.imageSourceMenu.hidden) return;
-  if (
-    dom.imageSourceMenu.contains(event.target) ||
-    dom.imageActionBtn === event.target ||
-    dom.imageActionBtn?.contains(event.target)
-  ) {
+async function handleImageSourceSelection(event) {
+  const { value } = event.target;
+  if (!value) {
     return;
   }
-  closeImageSourceMenu();
-}
 
-async function handleImageSourceMenuClick(event) {
-  const button = event.target.closest("button[data-source-action]");
-  if (!button) return;
-  event.preventDefault();
-  event.stopPropagation();
-
-  const action = button.dataset.sourceAction;
-  closeImageSourceMenu();
+  // reset selection immediately
+  event.target.value = "";
 
   try {
-    if (action === "upload") {
+    if (value === "upload") {
       dom.imageInput?.click();
       return;
     }
 
-    if (action === "screenshot") {
+    if (value === "screenshot") {
       const attachment = await captureScreenshotAttachment();
       addPendingAttachment(attachment);
       showStatus("Screenshot hinzugefügt.", "success", 2500);
       return;
     }
 
-    if (action === "camera") {
+    if (value === "camera") {
       const attachment = await captureCameraAttachment();
       addPendingAttachment(attachment);
       showStatus("Foto hinzugefügt.", "success", 2500);
