@@ -1,6 +1,8 @@
 const STORAGE_KEY = "ollama.chat.state.v1";
 const DEFAULT_SERVER_FALLBACK = "http://localhost:11434";
 let backendDefaultServer = DEFAULT_SERVER_FALLBACK;
+const APP_BASE_PATH = detectInitialBasePath();
+let activeBasePath = APP_BASE_PATH;
 
 const defaultParams = {
   temperature: 0.7,
@@ -22,6 +24,7 @@ const state = {
   editingMessageId: null,
   editingOriginalContent: "",
   editingDraft: "",
+  pendingAttachments: [],
 };
 
 let currentAbortController = null;
@@ -36,6 +39,7 @@ async function init() {
   bindEvents();
   ensureChatExists();
   renderAll();
+  renderPendingAttachments();
   refreshModels({ notifyOnSuccess: false });
 }
 
@@ -59,6 +63,9 @@ function cacheDom() {
   dom.messageForm = document.getElementById("message-form");
   dom.messageInput = document.getElementById("message-input");
   dom.imageInput = document.getElementById("image-input");
+  dom.imageActionBtn = document.getElementById("image-action-btn");
+  dom.imageSourceMenu = document.getElementById("image-source-menu");
+  dom.pendingAttachments = document.getElementById("pending-attachments");
   dom.messageSubmit = dom.messageForm?.querySelector('button[type="submit"]');
   dom.cancelRequestBtn = document.getElementById("cancel-request-btn");
   dom.statusBanner = document.getElementById("status-banner");
@@ -83,6 +90,7 @@ function restoreState() {
   state.editingMessageId = null;
   state.editingOriginalContent = "";
   state.editingDraft = "";
+  state.pendingAttachments = [];
 }
 
 function persistState() {
@@ -92,6 +100,7 @@ function persistState() {
       editingMessageId,
       editingOriginalContent,
       editingDraft,
+      pendingAttachments,
       ...persistable
     } = state;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(persistable));
@@ -167,6 +176,12 @@ function bindEvents() {
   dom.paramShowThinking.addEventListener("change", () =>
     updateChatParam("show_thinking", dom.paramShowThinking.checked)
   );
+
+  dom.imageActionBtn?.addEventListener("click", toggleImageSourceMenu);
+  dom.imageSourceMenu?.addEventListener("click", handleImageSourceMenuClick);
+  dom.imageInput?.addEventListener("change", handleImageFileSelection);
+  dom.pendingAttachments?.addEventListener("click", handlePendingAttachmentClick);
+  document.addEventListener("click", handleDocumentClickForImageMenu);
 
   dom.chatItems.addEventListener("click", (event) => {
     const li = event.target.closest("li[data-chat-id]");
@@ -560,16 +575,17 @@ function ollamaFetch(path, options = {}) {
     headers,
   };
 
-  return fetch(`/ollama${finalPath}`, merged);
+  return fetch(withBasePath(`/ollama${finalPath}`), merged);
 }
 
 async function fetchDefaultServer() {
   try {
-    const response = await fetch("/api/default-server");
+    const response = await fetch(withBasePath("/api/default-server"));
     if (!response.ok) {
       throw new Error(`unexpected status ${response.status}`);
     }
     const data = await response.json();
+    updateActiveBasePath(data?.basePath);
     return sanitizeUrl(data?.defaultServer, DEFAULT_SERVER_FALLBACK);
   } catch (error) {
     console.warn("Konnte DEFAULT_SERVER nicht vom Backend laden:", error);
@@ -696,19 +712,14 @@ async function handleMessageSubmit(event) {
     return;
   }
 
-  const attachments = [];
-  const file = dom.imageInput.files?.[0];
-  if (file) {
-    try {
-      const attachment = await readFileAsAttachment(file);
-      attachments.push(attachment);
-    } catch (error) {
-      showStatus(`Bild konnte nicht gelesen werden: ${error.message}`, "error", 3000);
-      return;
-    } finally {
-      // reset file input
-      dom.imageInput.value = "";
-    }
+  const attachments =
+    Array.isArray(state.pendingAttachments) && state.pendingAttachments.length
+      ? state.pendingAttachments.map((attachment) => ({ ...attachment }))
+      : [];
+  state.pendingAttachments = [];
+  renderPendingAttachments();
+  if (dom.imageInput) {
+    dom.imageInput.value = "";
   }
 
   const now = new Date().toISOString();
@@ -1613,6 +1624,289 @@ function createId() {
     return crypto.randomUUID();
   }
   return `id-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function toggleImageSourceMenu(event) {
+  if (!dom.imageSourceMenu) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (dom.imageSourceMenu.hidden) {
+    openImageSourceMenu();
+  } else {
+    closeImageSourceMenu();
+  }
+}
+
+function openImageSourceMenu() {
+  if (!dom.imageSourceMenu) return;
+  dom.imageSourceMenu.hidden = false;
+  dom.imageActionBtn?.setAttribute("aria-expanded", "true");
+}
+
+function closeImageSourceMenu() {
+  if (!dom.imageSourceMenu) return;
+  dom.imageSourceMenu.hidden = true;
+  dom.imageActionBtn?.setAttribute("aria-expanded", "false");
+}
+
+function handleDocumentClickForImageMenu(event) {
+  if (!dom.imageSourceMenu || dom.imageSourceMenu.hidden) return;
+  if (
+    dom.imageSourceMenu.contains(event.target) ||
+    dom.imageActionBtn === event.target ||
+    dom.imageActionBtn?.contains(event.target)
+  ) {
+    return;
+  }
+  closeImageSourceMenu();
+}
+
+async function handleImageSourceMenuClick(event) {
+  const button = event.target.closest("button[data-source-action]");
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+
+  const action = button.dataset.sourceAction;
+  closeImageSourceMenu();
+
+  try {
+    if (action === "upload") {
+      dom.imageInput?.click();
+      return;
+    }
+
+    if (action === "screenshot") {
+      const attachment = await captureScreenshotAttachment();
+      addPendingAttachment(attachment);
+      showStatus("Screenshot hinzugefügt.", "success", 2500);
+      return;
+    }
+
+    if (action === "camera") {
+      const attachment = await captureCameraAttachment();
+      addPendingAttachment(attachment);
+      showStatus("Foto hinzugefügt.", "success", 2500);
+      return;
+    }
+
+    showStatus("Aktion wird nicht unterstützt.", "error", 2500);
+  } catch (error) {
+    console.error("Fehler beim Erfassen eines Bildes:", error);
+    showStatus(error.message || "Bild konnte nicht aufgenommen werden.", "error", 4000);
+  }
+}
+
+async function handleImageFileSelection(event) {
+  const files = Array.from(event.target.files || []);
+  if (!files.length) {
+    return;
+  }
+
+  const added = [];
+  for (const file of files) {
+    try {
+      const attachment = await readFileAsAttachment(file);
+      addPendingAttachment(attachment);
+      added.push(file);
+    } catch (error) {
+      console.error("Konnte Datei nicht laden:", error);
+      showStatus(`Bild konnte nicht gelesen werden: ${error.message}`, "error", 3000);
+    }
+  }
+
+  if (added.length) {
+    showStatus(
+      added.length === 1 ? "Bild hinzugefügt." : `${added.length} Bilder hinzugefügt.`,
+      "success",
+      2500
+    );
+  }
+
+  event.target.value = "";
+}
+
+function handlePendingAttachmentClick(event) {
+  const removeBtn = event.target.closest("button.pending-attachment-remove");
+  if (!removeBtn) return;
+  const { attachmentId } = removeBtn.dataset;
+  removePendingAttachment(attachmentId);
+}
+
+function addPendingAttachment(attachment) {
+  if (!attachment) return;
+  if (!Array.isArray(state.pendingAttachments)) {
+    state.pendingAttachments = [];
+  }
+  state.pendingAttachments.push(attachment);
+  renderPendingAttachments();
+}
+
+function removePendingAttachment(attachmentId) {
+  if (!attachmentId || !Array.isArray(state.pendingAttachments)) return;
+  const next = state.pendingAttachments.filter((item) => item.id !== attachmentId);
+  state.pendingAttachments = next;
+  renderPendingAttachments();
+}
+
+function renderPendingAttachments() {
+  if (!dom.pendingAttachments) return;
+  const attachments = Array.isArray(state.pendingAttachments) ? state.pendingAttachments : [];
+  dom.pendingAttachments.innerHTML = "";
+  if (!attachments.length) {
+    dom.pendingAttachments.hidden = true;
+    return;
+  }
+  dom.pendingAttachments.hidden = false;
+
+  attachments.forEach((attachment) => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "pending-attachment";
+
+    const img = document.createElement("img");
+    img.src = attachment.dataUrl;
+    img.alt = attachment.name || "Angehängtes Bild";
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "pending-attachment-remove";
+    removeBtn.dataset.attachmentId = attachment.id;
+    removeBtn.textContent = "✕";
+
+    wrapper.append(img, removeBtn);
+    dom.pendingAttachments.appendChild(wrapper);
+  });
+}
+
+async function captureScreenshotAttachment() {
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== "function") {
+    throw new Error("Screenshot-Aufnahme wird von diesem Browser nicht unterstützt.");
+  }
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: true,
+  });
+  return await captureImageFromStream(stream, {
+    name: `screenshot-${new Date().toISOString()}.png`,
+  });
+}
+
+async function captureCameraAttachment() {
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
+    throw new Error("Kamera wird von diesem Browser nicht unterstützt.");
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "environment" },
+  });
+  return await captureImageFromStream(stream, {
+    name: `foto-${new Date().toISOString()}.png`,
+  });
+}
+
+async function captureImageFromStream(stream, { name }) {
+  const video = document.createElement("video");
+  video.srcObject = stream;
+  video.muted = true;
+  video.playsInline = true;
+
+  try {
+    await new Promise((resolve, reject) => {
+      const cleanup = () => {
+        video.removeEventListener("loadedmetadata", onLoaded);
+        video.removeEventListener("error", onError);
+      };
+      const onLoaded = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = (error) => {
+        cleanup();
+        reject(error || new Error("Videostream konnte nicht geladen werden."));
+      };
+      video.addEventListener("loadedmetadata", onLoaded, { once: true });
+      video.addEventListener("error", onError, { once: true });
+    });
+
+    await video.play();
+
+    const width = video.videoWidth || 1280;
+    const height = video.videoHeight || 720;
+    if (!width || !height) {
+      throw new Error("Videostream enthält keine gültigen Bilddaten.");
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      throw new Error("Screenshot konnte nicht erstellt werden.");
+    }
+    ctx.drawImage(video, 0, 0, width, height);
+
+    const dataUrl = canvas.toDataURL("image/png");
+    return {
+      id: createId(),
+      name,
+      mime: "image/png",
+      dataUrl,
+      base64: extractBase64(dataUrl),
+    };
+  } finally {
+    video.pause();
+    video.srcObject = null;
+    stream.getTracks().forEach((track) => track.stop());
+  }
+}
+
+function detectInitialBasePath() {
+  try {
+    const scriptUrl = new URL(import.meta.url);
+    const segments = scriptUrl.pathname.split("/");
+    segments.pop();
+    const directory = segments.join("/");
+    const normalized = normalizeBasePathValue(directory);
+    return normalized ?? "";
+  } catch (error) {
+    console.warn("Konnte Basis-Pfad nicht bestimmen:", error);
+    return "";
+  }
+}
+
+function normalizeBasePathValue(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  let normalized = value.trim();
+  if (!normalized) {
+    return "";
+  }
+  if (!normalized.startsWith("/")) {
+    normalized = `/${normalized}`;
+  }
+  normalized = normalized.replace(/\/+$/, "");
+  if (normalized === "/" || normalized === "") {
+    return "";
+  }
+  return normalized;
+}
+
+function updateActiveBasePath(value) {
+  const normalized = normalizeBasePathValue(value);
+  if (normalized === null || normalized === undefined) {
+    return;
+  }
+  activeBasePath = normalized;
+}
+
+function withBasePath(targetPath) {
+  if (!targetPath) {
+    return activeBasePath || "";
+  }
+  const ensuredPath = targetPath.startsWith("/") ? targetPath : `/${targetPath}`;
+  if (!activeBasePath) {
+    return ensuredPath;
+  }
+  return `${activeBasePath}${ensuredPath}`;
 }
 
 function readFileAsAttachment(file) {

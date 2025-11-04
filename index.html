@@ -119,10 +119,18 @@
               required
             ></textarea>
             <div class="message-form-footer">
-              <label class="file-label">
-                Bild anhängen
-                <input type="file" id="image-input" accept="image/*" />
-              </label>
+              <div class="attachment-controls">
+                <button type="button" id="image-action-btn" class="secondary-btn">
+                  Bild auswählen
+                </button>
+                <input type="file" id="image-input" accept="image/*" multiple hidden />
+                <div id="image-source-menu" class="image-source-menu" hidden>
+                  <button type="button" data-source-action="upload">Datei hochladen</button>
+                  <button type="button" data-source-action="screenshot">Screenshot aufnehmen</button>
+                  <button type="button" data-source-action="camera">Foto aufnehmen</button>
+                </div>
+              </div>
+              <div id="pending-attachments" class="pending-attachments" hidden></div>
               <button
                 type="button"
                 id="cancel-request-btn"

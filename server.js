@@ -9,6 +9,7 @@ const { pipeline } = require("stream/promises");
 const HOST = process.env.HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT) || 4173;
 const ROOT_DIR = path.resolve(__dirname);
+const BASE_PATH = normalizeBasePath(process.env.BASE_PATH || "");
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -33,8 +34,18 @@ const ALLOWED_HEADERS = "Content-Type, X-Ollama-Server, Authorization";
 const server = http.createServer(async (req, res) => {
   try {
     const { method = "GET" } = req;
-    const originalPath = (req.url || "/").split("?")[0] || "/";
-    const requestPath = sanitizePath(req.url || "/");
+    const requestUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+    const originalPathname = requestUrl.pathname || "/";
+    const { matchesBasePath, relativePathname } = getRelativePath(originalPathname);
+
+    if (!matchesBasePath) {
+      res.writeHead(404, buildCorsHeaders({ "Content-Type": "text/plain" }));
+      res.end("Not Found");
+      return;
+    }
+
+    const originalPath = relativePathname;
+    const requestPath = sanitizePath(relativePathname || "/");
 
     if (method === "OPTIONS") {
       res.writeHead(204, buildCorsHeaders());
@@ -43,7 +54,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (isOllamaRoute(originalPath)) {
-      await proxyOllamaRequest(req, res);
+      await proxyOllamaRequest(req, res, { originalUrl: requestUrl, relativePath: originalPath });
       return;
     }
 
@@ -51,6 +62,7 @@ const server = http.createServer(async (req, res) => {
       const body = JSON.stringify({
         defaultServer:
           normalizeServerUrl(process.env.DEFAULT_SERVER) || "http://localhost:11434",
+        basePath: BASE_PATH,
       });
       res.writeHead(
         200,
@@ -201,12 +213,15 @@ function normalizeServerUrl(url) {
   return trimmed.replace(/\/+$/, "");
 }
 
-async function proxyOllamaRequest(req, res) {
+async function proxyOllamaRequest(req, res, context = {}) {
   const corsHeaders = buildCorsHeaders();
   const method = req.method || "GET";
 
-  const originalUrl = new URL(req.url, `${req.protocol || "http"}://${req.headers.host || "localhost"}`);
-  let pathname = originalUrl.pathname.replace(/^\/?ollama/, "");
+  const originalUrl =
+    context.originalUrl ||
+    new URL(req.url, `${req.protocol || "http"}://${req.headers.host || "localhost"}`);
+  const relativePath = context.relativePath || originalUrl.pathname;
+  let pathname = relativePath.replace(/^\/?ollama/, "");
   if (!pathname.startsWith("/")) {
     pathname = `/${pathname}`;
   }
@@ -222,7 +237,8 @@ async function proxyOllamaRequest(req, res) {
 
   let targetUrl;
   try {
-    targetUrl = new URL(`${pathname}${originalUrl.search}`, ensureProtocol(targetBase));
+    const search = context.search ?? originalUrl.search;
+    targetUrl = new URL(`${pathname}${search}`, ensureProtocol(targetBase));
   } catch (error) {
     res.writeHead(400, buildCorsHeaders({ "Content-Type": "application/json" }));
     res.end(JSON.stringify({ error: "Ungültige Ziel-URL für Ollama Server." }));
@@ -362,6 +378,49 @@ function ensureProtocol(url) {
     return `http://${url.replace(/^\/+/, "")}`;
   }
   return url;
+}
+
+function normalizeBasePath(value) {
+  if (!value) return "";
+  let normalized = value.trim();
+  if (!normalized) return "";
+  if (!normalized.startsWith("/")) {
+    normalized = `/${normalized}`;
+  }
+  normalized = normalized.replace(/\/+$/, "");
+  if (normalized === "/") {
+    return "";
+  }
+  return normalized;
+}
+
+function getRelativePath(pathname) {
+  if (!BASE_PATH) {
+    return {
+      matchesBasePath: true,
+      relativePathname: pathname || "/",
+    };
+  }
+
+  if (pathname === BASE_PATH) {
+    return {
+      matchesBasePath: true,
+      relativePathname: "/",
+    };
+  }
+
+  if (pathname.startsWith(`${BASE_PATH}/`)) {
+    const stripped = pathname.slice(BASE_PATH.length) || "/";
+    return {
+      matchesBasePath: true,
+      relativePathname: stripped.startsWith("/") ? stripped : `/${stripped}`,
+    };
+  }
+
+  return {
+    matchesBasePath: false,
+    relativePathname: pathname,
+  };
 }
 
 module.exports = server;
