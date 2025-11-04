@@ -292,6 +292,9 @@ function renderMessages() {
 
   const template = document.getElementById("message-template");
   chat.messages.forEach((message) => {
+    if (message.purpose === "thinking" && message.showThinking === false) {
+      return;
+    }
     const node = template.content.cloneNode(true);
     const article = node.querySelector(".message");
     article.dataset.messageId = message.id;
@@ -730,7 +733,19 @@ async function handleMessageSubmit(event) {
     collapsed: false,
   };
 
-  chat.messages.push(userMessage, thinkingMessage);
+  const responsePreview = {
+    id: createId(),
+    role: "assistant",
+    content: "",
+    createdAt: now,
+    attachments: [],
+    pending: true,
+    purpose: "response_preview",
+    stats: null,
+    relatedThinkingId: thinkingMessage.id,
+  };
+
+  chat.messages.push(userMessage, thinkingMessage, responsePreview);
   chat.updatedAt = now;
   dom.messageInput.value = "";
   state.editingMessageId = null;
@@ -743,7 +758,7 @@ async function handleMessageSubmit(event) {
   renderChatList();
 
   try {
-    await streamChatCompletion(chat, thinkingMessage, currentAbortController.signal);
+    await streamChatCompletion(chat, thinkingMessage, responsePreview, currentAbortController.signal);
   } catch (error) {
     if (error.name === "AbortError") {
       thinkingMessage.pending = false;
@@ -761,6 +776,12 @@ async function handleMessageSubmit(event) {
       thinkingMessage.error = error.message;
       thinkingMessage.content =
         thinkingMessage.content || `Fehler bei der Antwort: ${error.message}`;
+      if (responsePreview) {
+        responsePreview.pending = false;
+        responsePreview.error = error.message;
+        responsePreview.content =
+          responsePreview.content || `Fehler bei der Antwort: ${error.message}`;
+      }
       chat.updatedAt = new Date().toISOString();
       persistState();
       renderMessages();
@@ -777,7 +798,7 @@ async function handleMessageSubmit(event) {
   }
 }
 
-async function streamChatCompletion(chat, thinkingMessage, signal) {
+async function streamChatCompletion(chat, thinkingMessage, previewMessage, signal) {
   const payload = {
     model: chat.model || state.defaultModel,
     messages: chat.messages
@@ -806,6 +827,7 @@ async function streamChatCompletion(chat, thinkingMessage, signal) {
     attachments: [],
     stats: null,
     thinking: thinkingMessage.thinking || "",
+    preview: previewMessage,
   };
 
   const reader = response.body.getReader();
@@ -874,6 +896,7 @@ function serializeMessageForRequest(message) {
 
 function handleStreamPayload(line, context) {
   const { thinkingMessage, responseState } = context;
+  const previewMessage = responseState.preview;
   const showThinking = Boolean(thinkingMessage.showThinking);
   let payload;
   try {
@@ -923,6 +946,11 @@ function handleStreamPayload(line, context) {
   if (responseChunk) {
     responseState.text += responseChunk;
     thinkingMessage.content = responseState.text;
+    if (previewMessage) {
+      previewMessage.content = responseState.text;
+      previewMessage.pending = true;
+      previewMessage.createdAt = new Date().toISOString();
+    }
     changed = true;
   }
 
@@ -945,6 +973,9 @@ function handleStreamPayload(line, context) {
   if (payload.done) {
     thinkingMessage.pending = false;
     responseState.stats = extractStats(payload);
+    if (previewMessage) {
+      previewMessage.pending = false;
+    }
     changed = true;
   }
 
@@ -955,21 +986,28 @@ function finalizeStream(chat, thinkingMessage, responseState) {
   thinkingMessage.pending = false;
   thinkingMessage.createdAt = thinkingMessage.createdAt || new Date().toISOString();
 
+  const previewMessage = responseState.preview;
   const split = splitThinkingFromAnswer(responseState.text || "");
   if (split && split.thinking) {
     thinkingMessage.thinking = split.thinking;
   }
 
+  const finalContent = (split ? split.answer : responseState.text || "").trim();
+  if (responseState.stats) {
+    responseState.stats.model = chat.model || state.defaultModel;
+  }
+
+  if (previewMessage) {
+    previewMessage.content = finalContent;
+    previewMessage.attachments = responseState.attachments || [];
+    previewMessage.stats = responseState.stats || null;
+    previewMessage.pending = false;
+    previewMessage.purpose = "response";
+    previewMessage.createdAt = new Date().toISOString();
+  }
+
   if (thinkingMessage.showThinking === false) {
-    const finalContent = (split ? split.answer : responseState.text || "").trim();
-    thinkingMessage.role = "assistant";
-    thinkingMessage.purpose = "response";
-    thinkingMessage.pending = false;
-    thinkingMessage.thinking = "";
-    thinkingMessage.content = finalContent;
-    thinkingMessage.attachments = responseState.attachments || [];
-    thinkingMessage.stats = responseState.stats || null;
-    thinkingMessage.collapsed = false;
+    removeThinkingMessage(chat, thinkingMessage.id, false);
     chat.updatedAt = new Date().toISOString();
     return;
   }
@@ -982,27 +1020,23 @@ function finalizeStream(chat, thinkingMessage, responseState) {
     chat.messages = chat.messages.filter((message) => message.id !== thinkingMessage.id);
   }
 
-  let finalContent = (split ? split.answer : responseState.text || "").trim();
-  if (responseState.stats) {
-    responseState.stats.model = chat.model || state.defaultModel;
-  }
-
-  const hasAttachments =
-    Array.isArray(responseState.attachments) && responseState.attachments.length > 0;
-
-  if (finalContent || hasAttachments || responseState.stats) {
-  const assistantMessage = {
-    id: createId(),
-    role: "assistant",
-    content: finalContent,
-    createdAt: new Date().toISOString(),
-    attachments: hasAttachments ? responseState.attachments : [],
-    pending: false,
-    purpose: "response",
-    stats: responseState.stats || null,
-  };
-  assistantMessage.relatedThinkingId = thinkingMessage.id;
-    chat.messages.push(assistantMessage);
+  if (!previewMessage) {
+    const hasAttachments =
+      Array.isArray(responseState.attachments) && responseState.attachments.length > 0;
+    if (finalContent || hasAttachments || responseState.stats) {
+      const assistantMessage = {
+        id: createId(),
+        role: "assistant",
+        content: finalContent,
+        createdAt: new Date().toISOString(),
+        attachments: hasAttachments ? responseState.attachments : [],
+        pending: false,
+        purpose: "response",
+        stats: responseState.stats || null,
+      };
+      assistantMessage.relatedThinkingId = thinkingMessage.id;
+      chat.messages.push(assistantMessage);
+    }
   }
 
   chat.updatedAt = new Date().toISOString();
@@ -1306,7 +1340,7 @@ function handleMessageListClick(event) {
   }
 }
 
-function removeThinkingMessage(chat, targetId) {
+function removeThinkingMessage(chat, targetId, removePreview = true) {
   if (!chat) return;
   const thinkingId =
     targetId ||
@@ -1316,6 +1350,15 @@ function removeThinkingMessage(chat, targetId) {
   const idx = chat.messages.findIndex((msg) => msg.id === thinkingId);
   if (idx !== -1) {
     chat.messages.splice(idx, 1);
+  }
+
+  if (removePreview) {
+    const previewIdx = chat.messages.findIndex(
+      (msg) => msg.relatedThinkingId === thinkingId
+    );
+    if (previewIdx !== -1) {
+      chat.messages.splice(previewIdx, 1);
+    }
   }
 }
 
@@ -1419,7 +1462,19 @@ async function submitEditedMessage() {
     collapsed: false,
   };
 
-  chat.messages.splice(msgIndex + 1, 0, thinkingMessage);
+  const responsePreview = {
+    id: createId(),
+    role: "assistant",
+    content: "",
+    createdAt: now,
+    attachments: [],
+    pending: true,
+    purpose: "response_preview",
+    stats: null,
+    relatedThinkingId: thinkingMessage.id,
+  };
+
+  chat.messages.splice(msgIndex + 1, 0, thinkingMessage, responsePreview);
   chat.updatedAt = now;
 
   state.editingMessageId = null;
@@ -1435,12 +1490,16 @@ async function submitEditedMessage() {
   showStatus("Nachricht aktualisiert, Anfrage wird erneut gesendet …", "success", 2000);
 
   try {
-    await streamChatCompletion(chat, thinkingMessage, currentAbortController.signal);
+    await streamChatCompletion(chat, thinkingMessage, responsePreview, currentAbortController.signal);
   } catch (error) {
     thinkingMessage.pending = false;
     thinkingMessage.error = error.message;
     thinkingMessage.content =
       thinkingMessage.content || `Fehler bei der Antwort: ${error.message}`;
+    responsePreview.pending = false;
+    responsePreview.error = error.message;
+    responsePreview.content =
+      responsePreview.content || `Fehler bei der Antwort: ${error.message}`;
     chat.updatedAt = new Date().toISOString();
     showStatus(error.message, "error");
   } finally {
@@ -1543,7 +1602,7 @@ function removeResponsesAfter(chat, userIndex) {
   if (!chat) return;
   for (let i = chat.messages.length - 1; i > userIndex; i -= 1) {
     const msg = chat.messages[i];
-    if (msg.role === "assistant" || msg.purpose === "thinking") {
+    if (msg.role === "assistant" || msg.purpose === "thinking" || msg.purpose === "response_preview") {
       chat.messages.splice(i, 1);
     }
   }

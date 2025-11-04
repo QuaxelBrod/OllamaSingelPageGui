@@ -198,12 +198,27 @@ async function proxyOllamaRequest(req, res) {
 
   try {
     const headers = {};
+    const blockedRequestHeaders = new Set([
+      TARGET_HEADER,
+      "host",
+      "connection",
+      "transfer-encoding",
+      "content-length",
+      "content-encoding",
+      "accept-encoding",
+      "keep-alive",
+      "proxy-authenticate",
+      "proxy-authorization",
+      "te",
+      "trailer",
+      "upgrade",
+    ]);
+
     for (const [key, value] of Object.entries(req.headers)) {
       const lower = key.toLowerCase();
-      if ([TARGET_HEADER, "host", "connection", "transfer-encoding"].includes(lower)) {
+      if (blockedRequestHeaders.has(lower)) {
         continue;
       }
-      console.log(`Proxy header: ${key}: ${value}`);
       headers[key] = value;
     }
 
@@ -231,35 +246,68 @@ async function proxyOllamaRequest(req, res) {
     }
     if (process.env.DEBUG_PROXY === "1") {
       console.log(`Result ${proxyResponse.status} ${proxyResponse.statusText}`);
-      // log body response for streaming
-      const reader = proxyResponse.body.getReader();
-      const decoder = new TextDecoder();
-      let chunk;
-
-      while (!(chunk = await reader.read()).done) {
-        console.log(decoder.decode(chunk.value, { stream: true }));
+      try {
+        const debugClone = proxyResponse.clone();
+        const reader = debugClone.body?.getReader();
+        if (reader) {
+          const decoder = new TextDecoder();
+          let chunk;
+          while (!(chunk = await reader.read()).done) {
+            console.log(decoder.decode(chunk.value, { stream: true }));
+          }
+          reader.releaseLock();
+        }
+      } catch (debugError) {
+        console.warn("Debug proxy log failed:", debugError);
       }
-      reader.releaseLock();
     }
+    const ignoredResponseHeaders = new Set(["transfer-encoding", "content-length"]);
     const responseHeaders = {};
     proxyResponse.headers.forEach((value, key) => {
-      if (!["transfer-encoding"].includes(key.toLowerCase())) {
-        responseHeaders[key] = value;
+      const lower = key.toLowerCase();
+      if (ignoredResponseHeaders.has(lower)) {
+        return;
       }
+      if (lower === "content-encoding") {
+        return;
+      }
+      responseHeaders[key] = value;
     });
 
-    res.writeHead(proxyResponse.status, { ...corsHeaders, ...responseHeaders });
-    if (typeof res.flushHeaders === "function") {
-      res.flushHeaders();
-    }
     if (method === "HEAD") {
+      res.writeHead(proxyResponse.status, { ...corsHeaders, ...responseHeaders });
       res.end();
       return;
     }
 
     if (!proxyResponse.body) {
+      res.writeHead(proxyResponse.status, { ...corsHeaders, ...responseHeaders });
       res.end();
       return;
+    }
+
+    const contentType =
+      responseHeaders["content-type"] ??
+      proxyResponse.headers.get("content-type") ??
+      "";
+    const shouldBuffer = shouldBufferResponse(contentType);
+
+    if (shouldBuffer) {
+      const arrayBuffer = await proxyResponse.arrayBuffer();
+      const bodyBuffer = Buffer.from(arrayBuffer);
+      const bufferedHeaders = {
+        ...corsHeaders,
+        ...responseHeaders,
+        "Content-Length": String(bodyBuffer.byteLength),
+      };
+      res.writeHead(proxyResponse.status, bufferedHeaders);
+      res.end(bodyBuffer);
+      return;
+    }
+
+    res.writeHead(proxyResponse.status, { ...corsHeaders, ...responseHeaders });
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
     }
 
     const nodeStream =
@@ -298,6 +346,16 @@ function ensureProtocol(url) {
     return `http://${url.replace(/^\/+/, "")}`;
   }
   return url;
+}
+
+function shouldBufferResponse(contentType) {
+  if (!contentType) return false;
+  const lower = contentType.toLowerCase();
+  if (lower.includes("ndjson")) return false;
+  if (lower.includes("text/event-stream")) return false;
+  if (lower.includes("application/json")) return true;
+  if (lower.includes("+json")) return true;
+  return false;
 }
 
 module.exports = server;
