@@ -219,11 +219,15 @@ async function proxyOllamaRequest(req, res) {
     if (process.env.DEBUG_PROXY === "1") {
       console.log(`Proxy ${method} ${targetUrl}`);
     }
-    
-    const proxyResponse = await fetch(targetUrl, fetchOptions);
-    
+
+    try {
+      const proxyResponse = await fetch(targetUrl, fetchOptions);
+    }
+    catch (fetchError) {
+      throw new Error(`Verbindungsfehler zum Ollama Server: ${fetchError}`);
+    }
     if (process.env.DEBUG_PROXY === "1") {
-      console.log(`Proxy result ${proxyResponse.status} ${proxyResponse.statusText}`);
+      console.log(`^ult ${proxyResponse.status} ${proxyResponse.statusText}`);
     }
     const responseHeaders = {};
     proxyResponse.headers.forEach((value, key) => {

@@ -13,7 +13,8 @@
         "NODE_ENV": "development",
         "PORT": "4173",
         "HOST": "0.0.0.0",
-        "DEBUG_PROXY": "1"
+        "DEBUG_PROXY": "1",
+        "DEBUG": "fetch:log"
       },
       "restart": true
     },
