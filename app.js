@@ -1860,16 +1860,68 @@ async function captureImageFromStream(stream, { name }) {
 
 function detectInitialBasePath() {
   try {
-    const scriptUrl = new URL(import.meta.url);
-    const segments = scriptUrl.pathname.split("/");
-    segments.pop();
-    const directory = segments.join("/");
-    const normalized = normalizeBasePathValue(directory);
-    return normalized ?? "";
+    const scriptPath = safeGetPathname(() => new URL(import.meta.url).pathname);
+    const locationPath =
+      typeof window !== "undefined" && window.location ? window.location.pathname : "";
+    const scriptCandidates = buildPathCandidates(scriptPath);
+    const locationCandidates = buildPathCandidates(locationPath);
+
+    const intersection = findLongestIntersection(scriptCandidates, locationCandidates);
+    if (intersection) {
+      return intersection;
+    }
+
+    if (locationCandidates.length) {
+      return locationCandidates[locationCandidates.length - 1];
+    }
+    if (scriptCandidates.length) {
+      return scriptCandidates[scriptCandidates.length - 1];
+    }
+
+    return "";
   } catch (error) {
     console.warn("Konnte Basis-Pfad nicht bestimmen:", error);
     return "";
   }
+}
+
+function safeGetPathname(getter) {
+  try {
+    return getter() || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function buildPathCandidates(pathname) {
+  if (typeof pathname !== "string" || !pathname.length) {
+    return [];
+  }
+  const segments = pathname.split("/").filter(Boolean);
+  if (!segments.length) {
+    return [];
+  }
+  const candidates = [];
+  let current = "";
+  for (const segment of segments) {
+    current = `${current}/${segment}`;
+    candidates.push(current);
+  }
+  return candidates;
+}
+
+function findLongestIntersection(aCandidates, bCandidates) {
+  if (!Array.isArray(aCandidates) || !Array.isArray(bCandidates)) {
+    return "";
+  }
+  const bSet = new Set(bCandidates);
+  for (let i = aCandidates.length - 1; i >= 0; i -= 1) {
+    const candidate = aCandidates[i];
+    if (bSet.has(candidate)) {
+      return candidate;
+    }
+  }
+  return "";
 }
 
 function normalizeBasePathValue(value) {
@@ -1893,6 +1945,12 @@ function normalizeBasePathValue(value) {
 function updateActiveBasePath(value) {
   const normalized = normalizeBasePathValue(value);
   if (normalized === null || normalized === undefined) {
+    return;
+  }
+  if (!normalized) {
+    if (!activeBasePath) {
+      activeBasePath = "";
+    }
     return;
   }
   activeBasePath = normalized;
