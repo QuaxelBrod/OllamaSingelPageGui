@@ -220,8 +220,9 @@ async function proxyOllamaRequest(req, res) {
       console.log(`Proxy ${method} ${targetUrl}`);
     }
 
+    let proxyResponse;
     try {
-      const proxyResponse = await fetch(targetUrl, fetchOptions);
+      proxyResponse = await fetch(targetUrl, fetchOptions);
     }
     catch (fetchError) {
       console.error("Fetch error:", fetchError.toString());
