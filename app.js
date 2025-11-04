@@ -580,18 +580,43 @@ function ollamaFetch(path, options = {}) {
 }
 
 async function fetchDefaultServer() {
-  try {
-    const response = await fetch(withBasePath("/api/default-server"));
-    if (!response.ok) {
-      throw new Error(`unexpected status ${response.status}`);
-    }
-    const data = await response.json();
-    updateActiveBasePath(data?.basePath);
-    return sanitizeUrl(data?.defaultServer, DEFAULT_SERVER_FALLBACK);
-  } catch (error) {
-    console.warn("Konnte DEFAULT_SERVER nicht vom Backend laden:", error);
-    return DEFAULT_SERVER_FALLBACK;
+  const triedBases = new Set();
+  const tryOrder = [];
+  if (activeBasePath && !triedBases.has(activeBasePath)) {
+    tryOrder.push(activeBasePath);
+    triedBases.add(activeBasePath);
   }
+  if (FALLBACK_LOCATION_BASE && !triedBases.has(FALLBACK_LOCATION_BASE)) {
+    tryOrder.push(FALLBACK_LOCATION_BASE);
+    triedBases.add(FALLBACK_LOCATION_BASE);
+  }
+  if (!triedBases.has("")) {
+    tryOrder.push("");
+    triedBases.add("");
+  }
+
+  for (const base of tryOrder) {
+    if (base !== activeBasePath) {
+      activeBasePath = base;
+    }
+    try {
+      const response = await fetch(withBasePath("/api/default-server"));
+      if (!response.ok) {
+        throw new Error(`unexpected status ${response.status}`);
+      }
+      const data = await response.json();
+      updateActiveBasePath(data?.basePath ?? base);
+      return sanitizeUrl(data?.defaultServer, DEFAULT_SERVER_FALLBACK);
+    } catch (error) {
+      if (tryOrder[tryOrder.length - 1] === base) {
+        console.warn("Konnte DEFAULT_SERVER nicht vom Backend laden:", error);
+      } else {
+        console.warn(`Konnte DEFAULT_SERVER mit Basis "${base || "/"}" nicht laden:`, error);
+      }
+    }
+  }
+
+  return DEFAULT_SERVER_FALLBACK;
 }
 
 function populateModelSelect(select, models, currentValue, allowEmpty = false) {
@@ -1956,19 +1981,34 @@ function extractBaseFromPath(pathname) {
     normalized = `/${normalized}`;
   }
 
-  normalized = normalized.replace(/\/+$/, "");
+  normalized = normalized.replace(/\/\/+/g, "/");
 
-  if (!normalized || normalized === "/") {
+  const collapse = normalized.replace(/\/+$/, "");
+  const lastSegment = collapse.split("/").pop();
+  if (lastSegment && lastSegment.includes(".")) {
+    normalized = collapse.slice(0, collapse.lastIndexOf("/"));
+  } else {
+    normalized = collapse;
+  }
+
+  if (!normalized || normalized === "") {
     return "";
   }
 
-  const lastSegment = normalized.split("/").pop();
-  if (lastSegment && lastSegment.includes(".")) {
-    const lastSlash = normalized.lastIndexOf("/");
-    normalized = normalized.slice(0, lastSlash);
+  if (normalized === "/") {
+    return "";
   }
 
-  return normalizeBasePathValue(normalized);
+  const segments = normalized.split("/").filter(Boolean);
+  if (!segments.length) {
+    return "";
+  }
+
+  const baseSegments = segments.slice(0, 1);
+  if (!baseSegments.length) {
+    return "";
+  }
+  return `/${baseSegments.join("/")}`;
 }
 
 function normalizeBasePathValue(value) {
@@ -1983,10 +2023,15 @@ function normalizeBasePathValue(value) {
     normalized = `/${normalized}`;
   }
   normalized = normalized.replace(/\/+$/, "");
+  normalized = normalized.replace(/\/\/+/g, "/");
   if (normalized === "/" || normalized === "") {
     return "";
   }
-  return normalized;
+  const segments = normalized.split("/").filter(Boolean);
+  if (!segments.length) {
+    return "";
+  }
+  return `/${segments.join("/")}`;
 }
 
 function updateActiveBasePath(value) {
