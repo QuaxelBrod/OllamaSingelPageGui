@@ -116,6 +116,39 @@ server.listen(PORT, HOST, () => {
   console.log(`Server ready at http://${HOST}:${PORT}`);
 });
 
+const activeConnections = new Set();
+
+server.on("connection", (socket) => {
+  activeConnections.add(socket);
+  socket.on("close", () => {
+    activeConnections.delete(socket);
+  });
+});
+
+function shutdown(signal) {
+  console.log(`Received ${signal}, shutting down gracefully...`);
+  server.close((err) => {
+    if (err) {
+      console.error("Error while closing server:", err);
+      process.exit(1);
+      return;
+    }
+    process.exit(0);
+  });
+
+  setTimeout(() => {
+    console.warn("Force closing lingering connections");
+    for (const socket of activeConnections) {
+      socket.destroy();
+    }
+    process.exit(0);
+  }, 5000).unref();
+}
+
+["SIGINT", "SIGTERM"].forEach((signal) => {
+  process.on(signal, () => shutdown(signal));
+});
+
 function sanitizePath(urlPath) {
   try {
     const cleaned = decodeURIComponent(urlPath.split("?")[0].split("#")[0]);
