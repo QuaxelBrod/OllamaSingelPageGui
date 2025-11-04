@@ -29,6 +29,9 @@ const state = {
 };
 
 let currentAbortController = null;
+let activeCameraStream = null;
+let cameraCaptureDeferred = null;
+let cameraKeydownActive = false;
 
 async function init() {
   cacheDom();
@@ -66,6 +69,10 @@ function cacheDom() {
   dom.imageInput = document.getElementById("image-input");
   dom.imageSourceSelect = document.getElementById("image-source-select");
   dom.pendingAttachments = document.getElementById("pending-attachments");
+  dom.cameraModal = document.getElementById("camera-modal");
+  dom.cameraPreview = document.getElementById("camera-preview");
+  dom.cameraCaptureBtn = document.getElementById("camera-capture-btn");
+  dom.cameraCancelBtn = document.getElementById("camera-cancel-btn");
   dom.messageSubmit = dom.messageForm?.querySelector('button[type="submit"]');
   dom.cancelRequestBtn = document.getElementById("cancel-request-btn");
   dom.statusBanner = document.getElementById("status-banner");
@@ -180,6 +187,9 @@ function bindEvents() {
   dom.imageSourceSelect?.addEventListener("change", handleImageSourceSelection);
   dom.imageInput?.addEventListener("change", handleImageFileSelection);
   dom.pendingAttachments?.addEventListener("click", handlePendingAttachmentClick);
+  dom.cameraCaptureBtn?.addEventListener("click", handleCameraCaptureClick);
+  dom.cameraCancelBtn?.addEventListener("click", handleCameraCancelClick);
+  dom.cameraModal?.addEventListener("click", handleCameraModalBackdropClick);
 
   dom.chatItems.addEventListener("click", (event) => {
     const li = event.target.closest("li[data-chat-id]");
@@ -1672,7 +1682,7 @@ async function handleImageSourceSelection(event) {
     }
 
     if (value === "camera") {
-      const attachment = await captureCameraAttachment();
+      const attachment = await captureCameraWithPreview();
       addPendingAttachment(attachment);
       showStatus("Foto hinzugefügt.", "success", 2500);
       return;
@@ -1680,6 +1690,10 @@ async function handleImageSourceSelection(event) {
 
     showStatus("Aktion wird nicht unterstützt.", "error", 2500);
   } catch (error) {
+    if (error?.isCanceled) {
+      showStatus(error.message || "Kameraaufnahme abgebrochen.", "info", 2000);
+      return;
+    }
     console.error("Fehler beim Erfassen eines Bildes:", error);
     showStatus(error.message || "Bild konnte nicht aufgenommen werden.", "error", 4000);
   }
@@ -1778,16 +1792,209 @@ async function captureScreenshotAttachment() {
   });
 }
 
-async function captureCameraAttachment() {
+async function captureCameraWithPreview() {
   if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
     throw new Error("Kamera wird von diesem Browser nicht unterstützt.");
   }
-  const stream = await navigator.mediaDevices.getUserMedia({
+
+  if (cameraCaptureDeferred) {
+    finishCameraCapture({ error: createCameraCancelError() });
+  }
+
+  const constraints = {
     video: { facingMode: "environment" },
+    audio: false,
+  };
+
+  const stream = await navigator.mediaDevices.getUserMedia(constraints);
+  activeCameraStream = stream;
+  try {
+    openCameraModal(stream);
+  } catch (error) {
+    stopActiveCameraStream();
+    throw error;
+  }
+
+  return await new Promise((resolve, reject) => {
+    cameraCaptureDeferred = { resolve, reject };
   });
-  return await captureImageFromStream(stream, {
-    name: `foto-${new Date().toISOString()}.png`,
+}
+
+function openCameraModal(stream) {
+  if (!dom.cameraModal || !dom.cameraPreview) {
+    throw new Error("Kameravoransicht steht nicht zur Verfügung.");
+  }
+
+  dom.cameraModal.hidden = false;
+  dom.cameraModal.setAttribute("aria-hidden", "false");
+  dom.cameraCaptureBtn?.setAttribute("disabled", "true");
+
+  const enableCapture = () => {
+    dom.cameraCaptureBtn?.removeAttribute("disabled");
+  };
+
+  const video = dom.cameraPreview;
+  video.srcObject = stream;
+  video.muted = true;
+  video.playsInline = true;
+
+  if (video.readyState >= 1) {
+    enableCapture();
+  } else {
+    video.addEventListener("loadedmetadata", enableCapture, { once: true });
+  }
+
+  const playPromise = video.play();
+  if (playPromise && typeof playPromise.then === "function") {
+    playPromise.catch((error) => {
+      console.warn("Kamera-Vorschau konnte nicht gestartet werden:", error);
+      dom.cameraCaptureBtn?.removeAttribute("disabled");
+    });
+  } else {
+    dom.cameraCaptureBtn?.removeAttribute("disabled");
+  }
+
+  if (!cameraKeydownActive) {
+    document.addEventListener("keydown", handleCameraKeydown, true);
+    cameraKeydownActive = true;
+  }
+
+  requestAnimationFrame(() => {
+    try {
+      dom.cameraModal?.focus({ preventScroll: true });
+    } catch (error) {
+      // ignore focus errors
+    }
   });
+}
+
+function closeCameraModal() {
+  if (dom.cameraModal) {
+    dom.cameraModal.hidden = true;
+    dom.cameraModal.setAttribute("aria-hidden", "true");
+  }
+  if (dom.cameraPreview) {
+    dom.cameraPreview.pause();
+    dom.cameraPreview.srcObject = null;
+  }
+  dom.cameraCaptureBtn?.removeAttribute("disabled");
+
+  if (cameraKeydownActive) {
+    document.removeEventListener("keydown", handleCameraKeydown, true);
+    cameraKeydownActive = false;
+  }
+
+  stopActiveCameraStream();
+}
+
+function stopActiveCameraStream() {
+  if (!activeCameraStream) return;
+  activeCameraStream.getTracks().forEach((track) => {
+    try {
+      track.stop();
+    } catch (error) {
+      console.warn("Kamerastream konnte nicht gestoppt werden:", error);
+    }
+  });
+  activeCameraStream = null;
+}
+
+async function handleCameraCaptureClick() {
+  if (!dom.cameraPreview || !activeCameraStream) {
+    return;
+  }
+  if (!cameraCaptureDeferred) return;
+
+  const button = dom.cameraCaptureBtn;
+  button?.setAttribute("disabled", "true");
+  try {
+    const attachment = await captureFrameFromVideo(
+      dom.cameraPreview,
+      activeCameraStream,
+      `foto-${new Date().toISOString()}.png`
+    );
+    finishCameraCapture({ attachment });
+  } catch (error) {
+    console.error("Foto konnte nicht aufgenommen werden:", error);
+    showStatus(error.message || "Foto konnte nicht aufgenommen werden.", "error", 4000);
+    button?.removeAttribute("disabled");
+  }
+}
+
+function handleCameraCancelClick() {
+  finishCameraCapture({ error: createCameraCancelError() });
+}
+
+function handleCameraModalBackdropClick(event) {
+  if (event.target === dom.cameraModal) {
+    handleCameraCancelClick();
+  }
+}
+
+function handleCameraKeydown(event) {
+  if (!dom.cameraModal || dom.cameraModal.hidden) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    handleCameraCancelClick();
+    return;
+  }
+  if ((event.key === "Enter" || event.key === " ") && !dom.cameraCaptureBtn?.disabled) {
+    event.preventDefault();
+    handleCameraCaptureClick();
+  }
+}
+
+function finishCameraCapture({ attachment, error }) {
+  closeCameraModal();
+  const deferred = cameraCaptureDeferred;
+  cameraCaptureDeferred = null;
+
+  if (!deferred) {
+    return;
+  }
+
+  if (attachment) {
+    deferred.resolve(attachment);
+    return;
+  }
+
+  deferred.reject(error || new Error("Kameraaufnahme fehlgeschlagen."));
+}
+
+async function captureFrameFromVideo(video, stream, name) {
+  const track = stream?.getVideoTracks?.()[0];
+  const settings = (typeof track?.getSettings === "function" && track.getSettings()) || {};
+  const width = video.videoWidth || settings.width || 1280;
+  const height = video.videoHeight || settings.height || 720;
+
+  if (!width || !height) {
+    throw new Error("Keine gültigen Bilddaten verfügbar.");
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Foto konnte nicht erstellt werden.");
+  }
+  ctx.drawImage(video, 0, 0, width, height);
+
+  const dataUrl = canvas.toDataURL("image/png");
+  return {
+    id: createId(),
+    name,
+    mime: "image/png",
+    dataUrl,
+    base64: extractBase64(dataUrl),
+  };
+}
+
+function createCameraCancelError() {
+  const error = new Error("Kameraaufnahme abgebrochen.");
+  error.name = "CameraCancel";
+  error.isCanceled = true;
+  return error;
 }
 
 async function captureImageFromStream(stream, { name }) {

@@ -145,6 +145,16 @@
         </section>
       </main>
 
+      <div id="camera-modal" class="camera-modal" hidden tabindex="-1" aria-hidden="true">
+        <div class="camera-modal-dialog">
+          <video id="camera-preview" autoplay playsinline muted></video>
+          <div class="camera-modal-actions">
+            <button type="button" id="camera-cancel-btn" class="secondary-btn">Abbrechen</button>
+            <button type="button" id="camera-capture-btn" class="primary-btn">Auslösen</button>
+          </div>
+        </div>
+      </div>
+
       <footer class="app-footer">
         <p>
           Einstellungen und Chats werden im Browser gespeichert. Verbinde dich
